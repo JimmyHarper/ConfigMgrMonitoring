@@ -1,0 +1,28 @@
+$WorkspaceId = "<LOG ANALYTICS WORKSPACE ID"
+
+$tableParams = @'
+{
+    "properties": {
+        "schema": {
+               "name": "ConfigMgr_Logs_CL",
+               "columns": [
+                    {
+                        "name": "TimeGenerated",
+                        "type": "DateTime"
+                    }, 
+                    {
+                        "name": "RawData",
+                        "type": "String"
+                    },
+                    {
+                        "name": "FilePath",
+                        "type": "String"
+                    }
+              ]
+        }
+    }
+}
+'@
+
+Invoke-AzRestMethod -Path "$WorkspaceId/tables/ConfigMgr_Logs_CL?api-version=2021-12-01-preview" -Method PUT -payload $tableParams
+

@@ -1,0 +1,26 @@
+{
+    "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+    "contentVersion": "1.0.0.0",
+    "parameters": {
+        "LogAnalyticsWorkspace": {
+            "value": "<LOG ANALYTICS WORKSPACE ID>",
+            "type": "String"
+        },
+        "ConfigMgrResourceGroupName": {
+            "value": "<CONFIGMGR RESOURCE GROUP NAME>",
+            "type": "String"
+        },
+        "CMGResourceGroupName": {
+            "value": "<CMG RESOURCE GROUP NAME>",
+            "type": "String"
+        },
+        "ConfigMgrLogPath": {
+            "value": "E:\\SMS\\Logs",
+            "type": "String"
+        },
+        "Location": {
+            "value": "<AZURE REGOIN>",
+            "type": "String"
+        }
+    }
+}

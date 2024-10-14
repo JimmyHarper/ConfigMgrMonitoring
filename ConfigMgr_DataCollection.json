@@ -1,0 +1,185 @@
+{
+    "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+    "contentVersion": "1.0.0.0",
+    "parameters": {
+        "LogAnalyticsWorkspace": {
+            "defaultValue": "",
+            "type": "String"
+        },
+        "ConfigMgrLogPath": {
+            "defaultValue": "",
+            "type": "String"
+        },
+        "Location": {
+            "defaultValue": "",
+            "type": "String"
+        }
+    },
+    "variables": {},
+    "resources": [
+        {
+            "type": "Microsoft.Insights/dataCollectionEndpoints",
+            "apiVersion": "2023-03-11",
+            "name": "ConfigMgr-DCE",
+            "location": "[parameters('Location')]",
+            "properties": {
+                "configurationAccess": {},
+                "logsIngestion": {},
+                "metricsIngestion": {},
+                "networkAcls": {
+                    "publicNetworkAccess": "Enabled"
+                }
+            }
+        },
+        {
+            "type": "Microsoft.Insights/dataCollectionRules",
+            "apiVersion": "2023-03-11",
+            "name": "ConfigMgr_DataCollection",
+            "location": "[parameters('Location')]",
+            "kind": "Windows",
+            "properties": {
+                "dataCollectionEndpointId": "[resourceId('Microsoft.Insights/dataCollectionEndpoints', 'ConfigMgr-DCE')]",
+                "streamDeclarations": {
+                    "Custom-Text-ConfigMgr_Logs_CL": {
+                        "columns": [
+                            {
+                                "name": "TimeGenerated",
+                                "type": "datetime"
+                            },
+                            {
+                                "name": "RawData",
+                                "type": "string"
+                            },
+                            {
+                                "name": "FilePath",
+                                "type": "string"
+                            }
+                        ]
+                    }
+                },
+                "dataSources": {
+                    "performanceCounters": [
+                        {
+                            "streams": [
+                                "Microsoft-Perf"
+                            ],
+                            "samplingFrequencyInSeconds": 60,
+                            "counterSpecifiers": [
+                                "\\CCM Message Queue(*)\\Messages Queued",
+                                "\\SMS Inbox(*)\\File Current Count",
+                                "\\SMS Outbox(*)\\File Current Count",
+                                "\\SMS Outbox(*)\\Total File Copy Failures",
+                                "\\SMS Software Inventory Processor\\Total SINVs Enqueued",
+                                "\\SMS Software Metering Processor\\Total SWM Usage Files Enqueued",
+                                "\\SMS Scheduler(_Total)\\Number of Jobs",
+                                "\\SMS Scheduler(_Total)\\Number of Send Requests",
+                                "\\SMS Notification Server\\Total online clients",
+                                "\\SMS Inventory Data Loader\\Total MIFs Enqueued",
+                                "\\Process(CCMExec)\\% Processor Time",
+                                "\\Process(SMSExec)\\% Processor Time"
+                            ],
+                            "name": "perfCounterDataSource60"
+                        }
+                    ],
+                    "windowsEventLogs": [
+                        {
+                            "streams": [
+                                "Microsoft-Event"
+                            ],
+                            "xPathQueries": [
+                                "Application!*[System[(Level=1 or Level=2 or Level=3 or Level=4 or Level=0 or Level=5)]]",
+                                "System!*[System[(Level=1 or Level=2 or Level=3 or Level=4 or Level=0 or Level=5)]]"
+                            ],
+                            "name": "eventLogsDataSource"
+                        }
+                    ],
+                    "logFiles": [
+                        {
+                            "streams": [
+                                "Custom-Text-ConfigMgr_Logs_CL"
+                            ],
+                            "filePatterns": [
+                                "[concat(parameters('ConfigMgrLogPath'),'\\CloudMgr.log')]",
+                                "[concat(parameters('ConfigMgrLogPath'),'\\SMS_CLOUD_PROXYCONNECTOR.log')]",
+                                "[concat(parameters('ConfigMgrLogPath'),'\\mpcontrol.log')]",
+                                "[concat(parameters('ConfigMgrLogPath'),'\\SMS_CloudConnection')]",
+                                "[concat(parameters('ConfigMgrLogPath'),'\\SMS_CloudConnection_CoMgmtGraphConnector.log')]",
+                                "[concat(parameters('ConfigMgrLogPath'),'\\SMS_CloudConnection_STSWorker.log')]",
+                                "[concat(parameters('ConfigMgrLogPath'),'\\WsfbSyncWorker.log')]",
+                                "[concat(parameters('ConfigMgrLogPath'),'\\SMS_Service_Connector.log')]",
+                                "[concat(parameters('ConfigMgrLogPath'),'\\CMG-dodnetucmg-dodnetucm000001-CMGService.log')]",
+                                "[concat(parameters('ConfigMgrLogPath'),'\\CMG-dodnetucmg-dodnetucm000000-CMGService.log')]",
+                                "E:\\Program Files\\Microsoft Configuration Manager\\Logs\\CloudMgr.log"
+                            ],
+                            "format": "text",
+                            "settings": {
+                                "text": {
+                                    "recordStartTimestampFormat": "ISO 8601"
+                                }
+                            },
+                            "name": "Custom-Text-ConfigMgr_Logs_CL"
+                        }
+                    ],
+                    "iisLogs": [
+                        {
+                            "streams": [
+                                "Microsoft-W3CIISLog"
+                            ],
+                            "name": "iisLogsDataSource"
+                        }
+                    ]
+                },
+                "destinations": {
+                    "logAnalytics": [
+                        {
+                            "workspaceResourceId": "[parameters('LogAnalyticsWorkspace')]",
+                            "name": "la-202981254"
+                        }
+                    ]
+                },
+                "dataFlows": [
+                    {
+                        "streams": [
+                            "Microsoft-Perf"
+                        ],
+                        "destinations": [
+                            "la-202981254"
+                        ],
+                        "transformKql": "source",
+                        "outputStream": "Microsoft-Perf"
+                    },
+                    {
+                        "streams": [
+                            "Microsoft-Event"
+                        ],
+                        "destinations": [
+                            "la-202981254"
+                        ],
+                        "transformKql": "source",
+                        "outputStream": "Microsoft-Event"
+                    },
+                    {
+                        "streams": [
+                            "Microsoft-W3CIISLog"
+                        ],
+                        "destinations": [
+                            "la-202981254"
+                        ],
+                        "transformKql": "source",
+                        "outputStream": "Microsoft-W3CIISLog"
+                    },
+                    {
+                        "streams": [
+                            "Custom-Text-ConfigMgr_Logs_CL"
+                        ],
+                        "destinations": [
+                            "la-202981254"
+                        ],
+                        "transformKql": "source",
+                        "outputStream": "Custom-ConfigMgr_Logs_CL"
+                    }
+                ]
+            }
+        }
+    ]
+}

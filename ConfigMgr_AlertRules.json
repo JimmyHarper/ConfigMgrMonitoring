@@ -1,0 +1,1582 @@
+{
+    "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+    "contentVersion": "1.0.0.0",
+    "parameters": {
+        "LogAnalyticsWorkspace": {
+            "defaultValue": "",
+            "type": "String"
+        },
+        "ConfigMgrResourceGroupName": {
+            "defaultValue": "",
+            "type": "String"
+        },
+        "CMGResourceGroupName": {
+            "defaultValue": "",
+            "type": "String"
+        },
+        "Location": {
+            "defaultValue": "",
+            "type": "String"
+        }
+    },
+    "variables": {},
+    "resources": [
+        {
+            "type": "microsoft.insights/scheduledqueryrules",
+            "apiVersion": "2023-03-15-preview",
+            "name": "ConfigMgr - CMG - High Request Processing Time",
+            "location": "[parameters('Location')]",
+            "properties": {
+                "displayName": "ConfigMgr - CMG - High Request Processing Time",
+                "description": "The request processing time for the CMG node is over threshold (CMGService.log).",
+                "severity": 1,
+                "enabled": true,
+                "evaluationFrequency": "PT5M",
+                "scopes": [
+                    "[parameters('LogAnalyticsWorkspace')]"
+                ],
+                "targetResourceTypes": [
+                    "Microsoft.OperationalInsights/workspaces"
+                ],
+                "windowSize": "P1D",
+                "criteria": {
+                    "allOf": [
+                        {
+                            "query": "//CMG Service Health\nConfigMgr_Logs_CL\n| extend Computer=tostring(split(_ResourceId, \"/\")[8])\n| extend FileName=tostring(split(FilePath, \"\\\\\")[-1])\n| where FileName contains \"CMGService.log\"\n| where RawData contains \"Summary - \"\n| project TimeGenerated, Computer, FileName, RawData, FilePath\n| parse RawData with * \"TotalRequestCount: \" TotalRequestCount: int \" TotalRequestSize: \" TotalRequestSizeBytes: int *\n| parse RawData with * \"TotalResponseCount: \" TotalResponseCount: int \" TotalResponseSize: \" TotalResponseSizeBytes: int *\n| parse RawData with * \"AverageElapsedTime: \" AverageElapsedTime_ms: int *\n| parse RawData with * \"ProcessingRate: \" ProcessingRate_RequestsPerSecond: real *\n| parse RawData with * \"$$<CMGService><\" DateTimeString: string \".\" *\n| project\n    TimeGenerated,\n    DateTimeString,\n    Computer,\n    FileName,\n    FilePath,\n    TotalRequestCount,\n    TotalRequestSizeBytes,\n    TotalResponseCount,\n    TotalResponseSizeBytes,\n    AverageElapsedTime_ms,\n    ProcessingRate_RequestsPerSecond\n| extend CMGNode=tostring(split(FileName, \"-\")[2])\n| summarize\n    RequestCount=round(sum(TotalRequestCount), 0),\n    round(ResponseCount=sum(TotalResponseCount), 0),\n    round(RequestSizeBytes=sum(TotalRequestSizeBytes), 0),\n    round(ResponseSizeBytes=sum(TotalResponseSizeBytes), 0),\n    round(AverageElapsedTime_ms=avg(AverageElapsedTime_ms), 0),\n    round(ProcessingRate_RequestsPerSecond=avg(ProcessingRate_RequestsPerSecond), 0)\n    by bin(TimeGenerated, 1m), CMGNode, Computer, FileName, FilePath\n| summarize arg_max(TimeGenerated, *) by CMGNode\n| extend TimeFromNow = now() - TimeGenerated\n| extend LastSummaryMinutes = toint(TimeFromNow / 1m)\n//Response count should be no less than 30% of request count\n| extend ResponseCountThreshold = RequestCount * 0.7\n| project\n    CMGNode,\n    LastSummaryMinutes,\n    RequestCount,\n    ResponseCount,\n    AverageElapsedTime_ms,\n    ResponseCountThreshold,\n    Computer,\n    FileName,\n    FilePath\n| extend Health = iff(LastSummaryMinutes > 15 or RequestCount == 0 or ResponseCount < ResponseCountThreshold or AverageElapsedTime_ms > 300000, 1, 0)\n| join kind=leftouter\n    (\n    Heartbeat\n    | distinct _ResourceId, Computer\n    //| extend Computer=tostring(split(_ResourceId,\"/\")[8])\n    | extend CMGNode = tolower(Computer)\n    //| extend CMGNode_ResourceId = tolower(_ResourceId)\n    | project CMGNode, _ResourceId\n    )\n    on CMGNode\n| join kind=leftouter\n    (\n    Heartbeat\n    | distinct _ResourceId, Computer\n    | extend Computer=tostring(split(_ResourceId, \"/\")[8])\n    | extend Computer = tolower(Computer)\n    | extend LogComputer_ResourceId = tolower(_ResourceId)\n    | project Computer, LogComputer_ResourceId\n    )\n    on Computer\n| extend LogComputer = Computer\n| project-away CMGNode1, Computer1, Computer\n| extend AverageElapsedTime_minutes = round(AverageElapsedTime_ms / 60000, 0)\n//| where AverageElapsedTime_minutes > 5\n\n",
+                            "timeAggregation": "Total",
+                            "metricMeasureColumn": "AverageElapsedTime_minutes",
+                            "dimensions": [
+                                {
+                                    "name": "CMGNode",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                },
+                                {
+                                    "name": "FileName",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                },
+                                {
+                                    "name": "FilePath",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                },
+                                {
+                                    "name": "LogComputer",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                }
+                            ],
+                            "resourceIdColumn": "_ResourceId",
+                            "operator": "GreaterThan",
+                            "threshold": 5,
+                            "failingPeriods": {
+                                "numberOfEvaluationPeriods": 1,
+                                "minFailingPeriodsToAlert": 1
+                            }
+                        }
+                    ]
+                },
+                "autoMitigate": true
+            }
+        },
+        {
+            "type": "microsoft.insights/scheduledqueryrules",
+            "apiVersion": "2023-03-15-preview",
+            "name": "ConfigMgr - CMG - Low Response Count",
+            "location": "[parameters('Location')]",
+            "properties": {
+                "displayName": "ConfigMgr - CMG - Low Response Count",
+                "description": "The response count for the CMG node is less than 50% of the request count (CMGService.log).",
+                "severity": 1,
+                "enabled": true,
+                "evaluationFrequency": "PT5M",
+                "scopes": [
+                    "[parameters('LogAnalyticsWorkspace')]"
+                ],
+                "targetResourceTypes": [
+                    "Microsoft.OperationalInsights/workspaces"
+                ],
+                "windowSize": "P1D",
+                "criteria": {
+                    "allOf": [
+                        {
+                            "query": "//CMG Service Health\nConfigMgr_Logs_CL\n| extend Computer=tostring(split(_ResourceId, \"/\")[8])\n| extend FileName=tostring(split(FilePath, \"\\\\\")[-1])\n| where FileName contains \"CMGService.log\"\n| where RawData contains \"Summary - \"\n| project TimeGenerated, Computer, FileName, RawData, FilePath\n| parse RawData with * \"TotalRequestCount: \" TotalRequestCount: int \" TotalRequestSize: \" TotalRequestSizeBytes: int *\n| parse RawData with * \"TotalResponseCount: \" TotalResponseCount: int \" TotalResponseSize: \" TotalResponseSizeBytes: int *\n| parse RawData with * \"AverageElapsedTime: \" AverageElapsedTime_ms: int *\n| parse RawData with * \"ProcessingRate: \" ProcessingRate_RequestsPerSecond: real *\n| parse RawData with * \"$$<CMGService><\" DateTimeString: string \".\" *\n| project\n    TimeGenerated,\n    DateTimeString,\n    Computer,\n    FileName,\n    FilePath,\n    TotalRequestCount,\n    TotalRequestSizeBytes,\n    TotalResponseCount,\n    TotalResponseSizeBytes,\n    AverageElapsedTime_ms,\n    ProcessingRate_RequestsPerSecond\n| extend CMGNode=tostring(split(FileName, \"-\")[2])\n| summarize\n    RequestCount=round(sum(TotalRequestCount), 0),\n    round(ResponseCount=sum(TotalResponseCount), 0),\n    round(RequestSizeBytes=sum(TotalRequestSizeBytes), 0),\n    round(ResponseSizeBytes=sum(TotalResponseSizeBytes), 0),\n    round(AverageElapsedTime_ms=avg(AverageElapsedTime_ms), 0),\n    round(ProcessingRate_RequestsPerSecond=avg(ProcessingRate_RequestsPerSecond), 0)\n    by bin(TimeGenerated, 1m), CMGNode, Computer, FileName, FilePath\n| summarize arg_max(TimeGenerated, *) by CMGNode\n| extend TimeFromNow = now() - TimeGenerated\n| extend LastSummaryMinutes = toint(TimeFromNow / 1m)\n//Response count should be no less than 30% of request count\n| extend ResponseCountThreshold = RequestCount * 0.7\n| extend ResponsePercentage = round((ResponseCount/RequestCount)*100,1)\n| project\n    CMGNode,\n    LastSummaryMinutes,\n    RequestCount,\n    ResponseCount,\n    AverageElapsedTime_ms,\n    ResponseCountThreshold,\n    ResponsePercentage,\n    Computer,\n    FileName,\n    FilePath\n| extend Health = iff(LastSummaryMinutes > 15 or RequestCount == 0 or ResponseCount < ResponseCountThreshold or AverageElapsedTime_ms > 300000, 1, 0)\n| join kind=leftouter\n    (\n    Heartbeat\n    | distinct _ResourceId, Computer\n    //| extend Computer=tostring(split(_ResourceId,\"/\")[8])\n    | extend CMGNode = tolower(Computer)\n    //| extend CMGNode_ResourceId = tolower(_ResourceId)\n    | project CMGNode, _ResourceId\n    )\n    on CMGNode\n| join kind=leftouter\n    (\n    Heartbeat\n    | distinct _ResourceId, Computer\n    | extend Computer=tostring(split(_ResourceId, \"/\")[8])\n    | extend Computer = tolower(Computer)\n    | extend LogComputer_ResourceId = tolower(_ResourceId)\n    | project Computer, LogComputer_ResourceId\n    )\n    on Computer\n| extend LogComputer = Computer\n| project-away CMGNode1, Computer1, Computer\n",
+                            "timeAggregation": "Total",
+                            "metricMeasureColumn": "ResponsePercentage",
+                            "dimensions": [
+                                {
+                                    "name": "CMGNode",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                },
+                                {
+                                    "name": "FileName",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                },
+                                {
+                                    "name": "FilePath",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                },
+                                {
+                                    "name": "LogComputer",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                }
+                            ],
+                            "resourceIdColumn": "_ResourceId",
+                            "operator": "LessThan",
+                            "threshold": 50,
+                            "failingPeriods": {
+                                "numberOfEvaluationPeriods": 1,
+                                "minFailingPeriodsToAlert": 1
+                            }
+                        }
+                    ]
+                },
+                "autoMitigate": true
+            }
+        },
+        {
+            "type": "microsoft.insights/scheduledqueryrules",
+            "apiVersion": "2023-03-15-preview",
+            "name": "ConfigMgr - CMG - No Requests",
+            "location": "[parameters('Location')]",
+            "properties": {
+                "displayName": "ConfigMgr - CMG - No Requests",
+                "description": "The request count for the CMG node is zero (from CMGService.log)",
+                "severity": 1,
+                "enabled": true,
+                "evaluationFrequency": "PT5M",
+                "scopes": [
+                    "[parameters('LogAnalyticsWorkspace')]"
+                ],
+                "targetResourceTypes": [
+                    "Microsoft.OperationalInsights/workspaces"
+                ],
+                "windowSize": "P1D",
+                "criteria": {
+                    "allOf": [
+                        {
+                            "query": "//CMG Service Health\nConfigMgr_Logs_CL\n| extend Computer=tostring(split(_ResourceId, \"/\")[8])\n| extend FileName=tostring(split(FilePath, \"\\\\\")[-1])\n| where FileName contains \"CMGService.log\"\n| where RawData contains \"Summary - \"\n| project TimeGenerated, Computer, FileName, RawData, FilePath\n| parse RawData with * \"TotalRequestCount: \" TotalRequestCount: int \" TotalRequestSize: \" TotalRequestSizeBytes: int *\n| parse RawData with * \"TotalResponseCount: \" TotalResponseCount: int \" TotalResponseSize: \" TotalResponseSizeBytes: int *\n| parse RawData with * \"AverageElapsedTime: \" AverageElapsedTime_ms: int *\n| parse RawData with * \"ProcessingRate: \" ProcessingRate_RequestsPerSecond: real *\n| parse RawData with * \"$$<CMGService><\" DateTimeString: string \".\" *\n| project\n    TimeGenerated,\n    DateTimeString,\n    Computer,\n    FileName,\n    FilePath,\n    TotalRequestCount,\n    TotalRequestSizeBytes,\n    TotalResponseCount,\n    TotalResponseSizeBytes,\n    AverageElapsedTime_ms,\n    ProcessingRate_RequestsPerSecond\n| extend CMGNode=tostring(split(FileName, \"-\")[2])\n| summarize\n    RequestCount=round(sum(TotalRequestCount), 0),\n    round(ResponseCount=sum(TotalResponseCount), 0),\n    round(RequestSizeBytes=sum(TotalRequestSizeBytes), 0),\n    round(ResponseSizeBytes=sum(TotalResponseSizeBytes), 0),\n    round(AverageElapsedTime_ms=avg(AverageElapsedTime_ms), 0),\n    round(ProcessingRate_RequestsPerSecond=avg(ProcessingRate_RequestsPerSecond), 0)\n    by bin(TimeGenerated, 1m), CMGNode, Computer, FileName, FilePath\n| summarize arg_max(TimeGenerated, *) by CMGNode\n| extend TimeFromNow = now() - TimeGenerated\n| extend LastSummaryMinutes = toint(TimeFromNow / 1m)\n//Response count should be no less than 30% of request count\n| extend ResponseCountThreshold = RequestCount * 0.7\n| project\n    CMGNode,\n    LastSummaryMinutes,\n    RequestCount,\n    ResponseCount,\n    AverageElapsedTime_ms,\n    ResponseCountThreshold,\n    Computer,\n    FileName,\n    FilePath\n| extend Health = iff(LastSummaryMinutes > 15 or RequestCount == 0 or ResponseCount < ResponseCountThreshold or AverageElapsedTime_ms > 300000, 1, 0)\n| join kind=leftouter\n    (\n    Heartbeat\n    | distinct _ResourceId, Computer\n    //| extend Computer=tostring(split(_ResourceId,\"/\")[8])\n    | extend CMGNode = tolower(Computer)\n    //| extend CMGNode_ResourceId = tolower(_ResourceId)\n    | project CMGNode, _ResourceId\n    )\n    on CMGNode\n| join kind=leftouter\n    (\n    Heartbeat\n    | distinct _ResourceId, Computer\n    | extend Computer=tostring(split(_ResourceId, \"/\")[8])\n    | extend Computer = tolower(Computer)\n    | extend LogComputer_ResourceId = tolower(_ResourceId)\n    | project Computer, LogComputer_ResourceId\n    )\n    on Computer\n| extend LogComputer = Computer\n| project-away CMGNode1, Computer1, Computer\n//| where RequestCount == 0\n\n",
+                            "timeAggregation": "Total",
+                            "metricMeasureColumn": "RequestCount",
+                            "dimensions": [
+                                {
+                                    "name": "CMGNode",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                },
+                                {
+                                    "name": "FileName",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                },
+                                {
+                                    "name": "FilePath",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                },
+                                {
+                                    "name": "LogComputer",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                }
+                            ],
+                            "resourceIdColumn": "_ResourceId",
+                            "operator": "Equal",
+                            "threshold": 0,
+                            "failingPeriods": {
+                                "numberOfEvaluationPeriods": 1,
+                                "minFailingPeriodsToAlert": 1
+                            }
+                        }
+                    ]
+                },
+                "autoMitigate": true
+            }
+        },
+        {
+            "type": "microsoft.insights/scheduledqueryrules",
+            "apiVersion": "2023-03-15-preview",
+            "name": "ConfigMgr - CMG - Scale Set Instance Issue",
+            "location": "[parameters('Location')]",
+            "properties": {
+                "displayName": "ConfigMgr - CMG - Scale Set Instance Issue",
+                "description": "The CMG Scale Set instance is either not running or not provisioned, based on the most recent entry for it in the CloudMgr.log file. See the alert details for additional information.",
+                "severity": 1,
+                "enabled": true,
+                "evaluationFrequency": "PT5M",
+                "scopes": [
+                    "[parameters('LogAnalyticsWorkspace')]"
+                ],
+                "targetResourceTypes": [
+                    "Microsoft.OperationalInsights/workspaces"
+                ],
+                "windowSize": "P1D",
+                "criteria": {
+                    "allOf": [
+                        {
+                            "query": "//CMG VM Scale Set Health\nConfigMgr_Logs_CL\n| extend Computer=tostring(split(_ResourceId,\"/\")[8])\n| extend FileName=tostring(split(FilePath,\"\\\\\")[-1])\n| where FileName == \"CloudMgr.log\"\n| where RawData contains \"VMSS\" and RawData contains \"vmPowerState\"\n| extend VMSSName = extract(\"VMSS (.*?) instance\", 1, RawData)\n| extend VMSSInstance = extract(\"<name type=\\\"string\\\">(.*?)</name>\", 1, RawData)\n| extend PowerState = extract(\"vmPowerState is: PowerState/(.*?) \", 1, RawData)\n| extend ProvisioningState = extract(\"provisioning state: ProvisioningState/(.*?)~~\", 1, RawData)\n| summarize arg_max(TimeGenerated,*) by VMSSName,VMSSInstance,Computer,FileName,FilePath\n| extend PowerState = strcat(toupper(substring(PowerState, 0, 1)), tolower(substring(PowerState, 1)))\n| extend ProvisioningState = strcat(toupper(substring(ProvisioningState, 0, 1)), tolower(substring(ProvisioningState, 1)))\n| extend VMSSName = toupper(VMSSName)\n| extend VMSSInstance = toupper(VMSSInstance)\n| extend TimeFromNow = now() - TimeGenerated\n| extend LastStatusUpdateMinutes = toint(TimeFromNow / 1m)\n| project VMSSName,VMSSInstance,LastStatusUpdateMinutes,PowerState,ProvisioningState,Computer,FileName,FilePath\n//| extend Health = iff(LastStatusUpdateMinutes > 15 or PowerState !=\"Running\" or ProvisioningState !=\"Succeeded\",1,0)\n| extend Health = iff(PowerState !=\"Running\" or ProvisioningState !=\"Succeeded\",1,0)\n| join kind=leftouter\n(\nHeartbeat\n| where ResourceType =~ \"virtualMachineScaleSets\"\n| distinct Computer,_ResourceId\n| extend VMSSName = toupper(split(_ResourceId,\"/\")[8])\n| extend VMSSResourceID = tostring(split(_ResourceId, \"/virtualmachines/\")[0])\n| distinct VMSSName,VMSSResourceID\n) on VMSSName\n| project-away VMSSName1\n",
+                            "timeAggregation": "Total",
+                            "metricMeasureColumn": "Health",
+                            "dimensions": [
+                                {
+                                    "name": "VMSSName",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                },
+                                {
+                                    "name": "VMSSInstance",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                },
+                                {
+                                    "name": "PowerState",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                },
+                                {
+                                    "name": "ProvisioningState",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                },
+                                {
+                                    "name": "FileName",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                },
+                                {
+                                    "name": "FilePath",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                }
+                            ],
+                            "resourceIdColumn": "VMSSResourceID",
+                            "operator": "GreaterThan",
+                            "threshold": 0,
+                            "failingPeriods": {
+                                "numberOfEvaluationPeriods": 1,
+                                "minFailingPeriodsToAlert": 1
+                            }
+                        }
+                    ]
+                },
+                "autoMitigate": true
+            }
+        },
+        {
+            "type": "microsoft.insights/scheduledqueryrules",
+            "apiVersion": "2023-03-15-preview",
+            "name": "ConfigMgr - CMG - Scale Set status not written to CloudMgr.log",
+            "location": "[parameters('Location')]",
+            "properties": {
+                "displayName": "ConfigMgr - CMG - Scale Set status not written to CloudMgr.log",
+                "description": "The site server has not written the CMG Scale Set status to the CloudMgr.log file in over 15 minutes.",
+                "severity": 1,
+                "enabled": true,
+                "evaluationFrequency": "PT5M",
+                "scopes": [
+                    "[parameters('LogAnalyticsWorkspace')]"
+                ],
+                "targetResourceTypes": [
+                    "Microsoft.OperationalInsights/workspaces"
+                ],
+                "windowSize": "P1D",
+                "criteria": {
+                    "allOf": [
+                        {
+                            "query": "//CMG VM Scale Set Health\nConfigMgr_Logs_CL\n| extend Computer=tostring(split(_ResourceId,\"/\")[8])\n| extend FileName=tostring(split(FilePath,\"\\\\\")[-1])\n| where FileName == \"CloudMgr.log\"\n| where RawData contains \"VMSS\" and RawData contains \"vmPowerState\"\n| extend VMSSName = extract(\"VMSS (.*?) instance\", 1, RawData)\n| extend VMSSInstance = extract(\"<name type=\\\"string\\\">(.*?)</name>\", 1, RawData)\n| extend PowerState = extract(\"vmPowerState is: PowerState/(.*?) \", 1, RawData)\n| extend ProvisioningState = extract(\"provisioning state: ProvisioningState/(.*?)~~\", 1, RawData)\n| summarize arg_max(TimeGenerated,*) by _ResourceId,VMSSName\n| extend TimeFromNow = now() - TimeGenerated\n| extend LastStatusUpdateMinutes = toint(TimeFromNow / 1m)\n| project Computer,VMSSName, FilePath,FileName,LastStatusUpdateMinutes,_ResourceId\n",
+                            "timeAggregation": "Total",
+                            "metricMeasureColumn": "LastStatusUpdateMinutes",
+                            "dimensions": [
+                                {
+                                    "name": "Computer",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                },
+                                {
+                                    "name": "VMSSName",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                },
+                                {
+                                    "name": "FilePath",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                },
+                                {
+                                    "name": "FileName",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                }
+                            ],
+                            "resourceIdColumn": "_ResourceId",
+                            "operator": "GreaterThan",
+                            "threshold": 15,
+                            "failingPeriods": {
+                                "numberOfEvaluationPeriods": 1,
+                                "minFailingPeriodsToAlert": 1
+                            }
+                        }
+                    ]
+                },
+                "autoMitigate": true
+            }
+        },
+        {
+            "type": "microsoft.insights/scheduledqueryrules",
+            "apiVersion": "2023-03-15-preview",
+            "name": "ConfigMgr - CMG - Service Status not written to CMGService.log",
+            "location": "[parameters('Location')]",
+            "properties": {
+                "displayName": "ConfigMgr - CMG - Service Status not written to CMGService.log",
+                "description": "The CMG service status has not been written to the CMGService.log file in over 15 minutes,",
+                "severity": 1,
+                "enabled": true,
+                "evaluationFrequency": "PT5M",
+                "scopes": [
+                    "[parameters('LogAnalyticsWorkspace')]"
+                ],
+                "targetResourceTypes": [
+                    "Microsoft.OperationalInsights/workspaces"
+                ],
+                "windowSize": "P1D",
+                "criteria": {
+                    "allOf": [
+                        {
+                            "query": "//CMG Service Health\nConfigMgr_Logs_CL\n| extend Computer=tostring(split(_ResourceId, \"/\")[8])\n| extend FileName=tostring(split(FilePath, \"\\\\\")[-1])\n| where FileName contains \"CMGService.log\"\n| where RawData contains \"Summary - \"\n| project TimeGenerated, Computer, FileName, RawData, FilePath\n| parse RawData with * \"TotalRequestCount: \" TotalRequestCount: int \" TotalRequestSize: \" TotalRequestSizeBytes: int *\n| parse RawData with * \"TotalResponseCount: \" TotalResponseCount: int \" TotalResponseSize: \" TotalResponseSizeBytes: int *\n| parse RawData with * \"AverageElapsedTime: \" AverageElapsedTime_ms: int *\n| parse RawData with * \"ProcessingRate: \" ProcessingRate_RequestsPerSecond: real *\n| parse RawData with * \"$$<CMGService><\" DateTimeString: string \".\" *\n| project\n    TimeGenerated,\n    DateTimeString,\n    Computer,\n    FileName,\n    FilePath,\n    TotalRequestCount,\n    TotalRequestSizeBytes,\n    TotalResponseCount,\n    TotalResponseSizeBytes,\n    AverageElapsedTime_ms,\n    ProcessingRate_RequestsPerSecond\n| extend CMGNode=tostring(split(FileName, \"-\")[2])\n| summarize\n    RequestCount=round(sum(TotalRequestCount), 0),\n    round(ResponseCount=sum(TotalResponseCount), 0),\n    round(RequestSizeBytes=sum(TotalRequestSizeBytes), 0),\n    round(ResponseSizeBytes=sum(TotalResponseSizeBytes), 0),\n    round(AverageElapsedTime_ms=avg(AverageElapsedTime_ms), 0),\n    round(ProcessingRate_RequestsPerSecond=avg(ProcessingRate_RequestsPerSecond), 0)\n    by bin(TimeGenerated, 1m), CMGNode, Computer, FileName, FilePath\n| summarize arg_max(TimeGenerated, *) by CMGNode\n| extend TimeFromNow = now() - TimeGenerated\n| extend LastSummaryMinutes = toint(TimeFromNow / 1m)\n| extend LastSummaryTime_UTC = tostring(TimeGenerated)\n//Response count should be no less than 30% of request count\n| extend ResponseCountThreshold = RequestCount * 0.7\n| project\n    CMGNode,\n    LastSummaryTime_UTC,\n    LastSummaryMinutes,\n    RequestCount,\n    ResponseCount,\n    AverageElapsedTime_ms,\n    ResponseCountThreshold,\n    Computer,\n    FileName,\n    FilePath\n| extend Health = iff(LastSummaryMinutes > 15 or RequestCount == 0 or ResponseCount < ResponseCountThreshold or AverageElapsedTime_ms > 300000, 1, 0)\n| join kind=leftouter\n    (\n    Heartbeat\n    | distinct _ResourceId, Computer\n    //| extend Computer=tostring(split(_ResourceId,\"/\")[8])\n    | extend CMGNode = tolower(Computer)\n    //| extend CMGNode_ResourceId = tolower(_ResourceId)\n    | project CMGNode, _ResourceId\n    )\n    on CMGNode\n| join kind=leftouter\n    (\n    Heartbeat\n    | distinct _ResourceId, Computer\n    | extend Computer=tostring(split(_ResourceId, \"/\")[8])\n    | extend Computer = tolower(Computer)\n    | extend LogComputer_ResourceId = tolower(_ResourceId)\n    | project Computer, LogComputer_ResourceId\n    )\n    on Computer\n| extend LogComputer = Computer\n| project-away CMGNode1, Computer1, Computer\n//| where LastSummaryMinutes > 15\n\n",
+                            "timeAggregation": "Total",
+                            "metricMeasureColumn": "LastSummaryMinutes",
+                            "dimensions": [
+                                {
+                                    "name": "CMGNode",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                },
+                                {
+                                    "name": "LastSummaryTime_UTC",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                },
+                                {
+                                    "name": "FileName",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                },
+                                {
+                                    "name": "FilePath",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                },
+                                {
+                                    "name": "LogComputer",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                }
+                            ],
+                            "resourceIdColumn": "_ResourceId",
+                            "operator": "GreaterThan",
+                            "threshold": 15,
+                            "failingPeriods": {
+                                "numberOfEvaluationPeriods": 1,
+                                "minFailingPeriodsToAlert": 1
+                            }
+                        }
+                    ]
+                },
+                "autoMitigate": true
+            }
+        },
+        {
+            "type": "microsoft.insights/scheduledqueryrules",
+            "apiVersion": "2023-03-15-preview",
+            "name": "ConfigMgr - CMG Connection Point - CMG Connection Test Not Running",
+            "location": "[parameters('Location')]",
+            "properties": {
+                "displayName": "ConfigMgr - CMG Connection Point - CMG Connection Test Not Running",
+                "description": "The connection test to the CMG has not run in over 5 minutes",
+                "severity": 1,
+                "enabled": true,
+                "evaluationFrequency": "PT5M",
+                "scopes": [
+                    "[parameters('LogAnalyticsWorkspace')]"
+                ],
+                "targetResourceTypes": [
+                    "Microsoft.OperationalInsights/workspaces"
+                ],
+                "windowSize": "P1D",
+                "criteria": {
+                    "allOf": [
+                        {
+                            "query": "//CMG Connection Tests Health\nNWConnectionMonitorTestResult \n| where TestGroupName == \"MECM-CMG-Connection\"\n| summarize LastConnectionTest=arg_max(TimeGenerated, *) by SourceName, DestinationPort\n| extend SourceName = tostring(split(SourceName, \"(\")[0])\n| extend TimeFromNow = now() - LastConnectionTest\n| extend LastConnectionTestMinutes = toint(TimeFromNow / 1m)\n| extend LastConnectionTest_UTC = tostring(LastConnectionTest)\n| extend Failed = strcat(ChecksFailed, \"/\", ChecksTotal)\n| project\n    Source=tolower(SourceName),\n    Port=DestinationPort,\n    DestinationName,\n    DestinationAddress,\n    LastConnectionTest_UTC,\n    LastConnectionTestMinutes,\n    Result=TestResult,\n    ChecksFailed,\n    Failed,\n    MaxRTT=round(MaxRoundTripTimeMs, 0),\n    AvgRTT=round(AvgRoundTripTimeMs, 0)\n| order by Source asc, Port asc\n| extend Health = iff(LastConnectionTestMinutes > 5 or Result != \"Pass\" or ChecksFailed > 3 or AvgRTT > 100, 1, 0)\n| join kind=leftouter \n    (\n    Heartbeat\n    | distinct _ResourceId, Computer\n    | extend Computer=tostring(split(_ResourceId, \"/\")[8])\n    | extend Computer = tolower(Computer)\n    | project Computer, _ResourceId\n    )\n    on $left.Source == $right.Computer\n//| where LastConnectionTestMinutes > 5\n\n",
+                            "timeAggregation": "Total",
+                            "metricMeasureColumn": "LastConnectionTestMinutes",
+                            "dimensions": [
+                                {
+                                    "name": "Port",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                },
+                                {
+                                    "name": "DestinationName",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                },
+                                {
+                                    "name": "DestinationAddress",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                },
+                                {
+                                    "name": "LastConnectionTest_UTC",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                }
+                            ],
+                            "resourceIdColumn": "_ResourceId",
+                            "operator": "GreaterThan",
+                            "threshold": 10,
+                            "failingPeriods": {
+                                "numberOfEvaluationPeriods": 1,
+                                "minFailingPeriodsToAlert": 1
+                            }
+                        }
+                    ]
+                },
+                "autoMitigate": true
+            }
+        },
+        {
+            "type": "microsoft.insights/scheduledqueryrules",
+            "apiVersion": "2023-03-15-preview",
+            "name": "ConfigMgr - CMG Connection Point - CMG Connection Tests Failed",
+            "location": "[parameters('Location')]",
+            "properties": {
+                "displayName": "ConfigMgr - CMG Connection Point - CMG Connection Tests Failed",
+                "description": "The connection test to the CMG has failures",
+                "severity": 1,
+                "enabled": true,
+                "evaluationFrequency": "PT5M",
+                "scopes": [
+                    "[parameters('LogAnalyticsWorkspace')]"
+                ],
+                "targetResourceTypes": [
+                    "Microsoft.OperationalInsights/workspaces"
+                ],
+                "windowSize": "P1D",
+                "criteria": {
+                    "allOf": [
+                        {
+                            "query": "//CMG Connection Tests Health\nNWConnectionMonitorTestResult \n| where TestGroupName == \"MECM-CMG-Connection\"\n| summarize LastConnectionTest=arg_max(TimeGenerated, *) by SourceName, DestinationPort\n| extend SourceName = tostring(split(SourceName, \"(\")[0])\n| extend TimeFromNow = now() - LastConnectionTest\n| extend LastConnectionTestMinutes = toint(TimeFromNow / 1m)\n| extend LastConnectionTest_UTC = tostring(LastConnectionTest)\n| extend Failed = strcat(ChecksFailed, \"/\", ChecksTotal)\n| project\n    Source=tolower(SourceName),\n    Port=DestinationPort,\n    LastConnectionTest_UTC,\n    LastConnectionTestMinutes,\n    Result=TestResult,\n    ChecksFailed,\n    Failed,\n    MaxRTT=round(MaxRoundTripTimeMs, 0),\n    AvgRTT=round(AvgRoundTripTimeMs, 0)\n| order by Source asc, Port asc\n| extend Health = iff(LastConnectionTestMinutes > 5 or Result != \"Pass\" or ChecksFailed > 3 or AvgRTT > 100, 1, 0)\n| join kind=leftouter \n    (\n    Heartbeat\n    | distinct _ResourceId, Computer\n    | extend Computer=tostring(split(_ResourceId, \"/\")[8])\n    | extend Computer = tolower(Computer)\n    | project Computer, _ResourceId\n    )\n    on $left.Source == $right.Computer\n//| where ChecksFailed > 3\n\n",
+                            "timeAggregation": "Total",
+                            "metricMeasureColumn": "ChecksFailed",
+                            "dimensions": [
+                                {
+                                    "name": "Port",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                },
+                                {
+                                    "name": "LastConnectionTest_UTC",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                },
+                                {
+                                    "name": "Failed",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                }
+                            ],
+                            "resourceIdColumn": "_ResourceId",
+                            "operator": "GreaterThan",
+                            "threshold": 3,
+                            "failingPeriods": {
+                                "numberOfEvaluationPeriods": 1,
+                                "minFailingPeriodsToAlert": 1
+                            }
+                        }
+                    ]
+                },
+                "autoMitigate": true
+            }
+        },
+        {
+            "type": "microsoft.insights/scheduledqueryrules",
+            "apiVersion": "2023-03-15-preview",
+            "name": "ConfigMgr - CMG Connection Point - CMG Connection Tests have high rount-trip-time",
+            "location": "[parameters('Location')]",
+            "properties": {
+                "displayName": "ConfigMgr - CMG Connection Point - CMG Connection Tests have high rount-trip-time",
+                "description": "The connection test to the CMG has a RTT over 100ms.",
+                "severity": 1,
+                "enabled": true,
+                "evaluationFrequency": "PT5M",
+                "scopes": [
+                    "[parameters('LogAnalyticsWorkspace')]"
+                ],
+                "targetResourceTypes": [
+                    "Microsoft.OperationalInsights/workspaces"
+                ],
+                "windowSize": "P1D",
+                "criteria": {
+                    "allOf": [
+                        {
+                            "query": "//CMG Connection Tests Health\nNWConnectionMonitorTestResult \n| where TestGroupName == \"MECM-CMG-Connection\"\n| summarize LastConnectionTest=arg_max(TimeGenerated, *) by SourceName, DestinationPort\n| extend SourceName = tostring(split(SourceName, \"(\")[0])\n| extend TimeFromNow = now() - LastConnectionTest\n| extend LastConnectionTestMinutes = toint(TimeFromNow / 1m)\n| extend LastConnectionTest_UTC = tostring(LastConnectionTest)\n| extend Failed = strcat(ChecksFailed, \"/\", ChecksTotal)\n| project\n    Source=tolower(SourceName),\n    Port=DestinationPort,\n    LastConnectionTest_UTC,\n    LastConnectionTestMinutes,\n    Result=TestResult,\n    ChecksFailed,\n    Failed,\n    MaxRTT=round(MaxRoundTripTimeMs, 0),\n    AvgRTT=round(AvgRoundTripTimeMs, 0)\n| order by Source asc, Port asc\n| extend Health = iff(LastConnectionTestMinutes > 5 or Result != \"Pass\" or ChecksFailed > 3 or AvgRTT > 100, 1, 0)\n| join kind=leftouter \n    (\n    Heartbeat\n    | distinct _ResourceId, Computer\n    | extend Computer=tostring(split(_ResourceId, \"/\")[8])\n    | extend Computer = tolower(Computer)\n    | project Computer, _ResourceId\n    )\n    on $left.Source == $right.Computer\n//| where AvgRTT > 100\n\n",
+                            "timeAggregation": "Average",
+                            "metricMeasureColumn": "AvgRTT",
+                            "dimensions": [
+                                {
+                                    "name": "Port",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                },
+                                {
+                                    "name": "LastConnectionTest_UTC",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                }
+                            ],
+                            "resourceIdColumn": "_ResourceId",
+                            "operator": "GreaterThan",
+                            "threshold": 100,
+                            "failingPeriods": {
+                                "numberOfEvaluationPeriods": 1,
+                                "minFailingPeriodsToAlert": 1
+                            }
+                        }
+                    ]
+                },
+                "autoMitigate": true
+            }
+        },
+        {
+            "type": "microsoft.insights/scheduledqueryrules",
+            "apiVersion": "2023-03-15-preview",
+            "name": "ConfigMgr - CMG Connection Point - Failed Requests Exceeded Threshold",
+            "location": "[parameters('Location')]",
+            "properties": {
+                "displayName": "ConfigMgr - CMG Connection Point - Failed Requests Exceeded Threshold",
+                "description": "The CMG Connection Point failed requests is more than 25% of total requests (SMS_CLOUD_PROXYCONNECTOR.log).",
+                "severity": 1,
+                "enabled": true,
+                "evaluationFrequency": "PT5M",
+                "scopes": [
+                    "[parameters('LogAnalyticsWorkspace')]"
+                ],
+                "targetResourceTypes": [
+                    "Microsoft.OperationalInsights/workspaces"
+                ],
+                "windowSize": "P1D",
+                "criteria": {
+                    "allOf": [
+                        {
+                            "query": "//CMG Connection Point Requests Health\nConfigMgr_Logs_CL\n| extend Computer=tostring(split(_ResourceId, \"/\")[8])\n| extend FileName=tostring(split(FilePath, \"\\\\\")[-1])\n| project TimeGenerated, Computer, FileName, FilePath, RawData\n| where FileName == \"SMS_CLOUD_PROXYCONNECTOR.log\"\n| where RawData contains \"ReportTrafficData - state message to send:\"\n| parse RawData with * 'ServerName=\"' ServerName '\"' * 'StartTime=\"' StartTime '\"' * 'EndTime=\"' EndTime '\"' * 'MaxConcurrentRequests=\"' MaxConcurrentRequests '\"' * '<EndPoints>' EndPoints '</EndPoints>' *\n| extend EndPoints = split(EndPoints, '~~')\n| mv-expand EndPoints\n| parse EndPoints with * 'Name=\"' Endpoint '\"' * 'ProxyServer=\"' ProxyServer '\"' * 'TargetHost=\"' TargetHost '\"' * 'TotalRequests=\"' TotalRequests '\"' * 'TotalRequestsWithBearerToken=\"' TotalRequestsWithBearerToken '\"' * 'MaxConcurrentRequests=\"' MaxConcurrentRequests '\"' * 'TotalRequestBytes=\"' TotalRequestBytes '\"' * 'TotalResponseBytes=\"' TotalResponseBytes '\"' * 'FailedRequests=\"' FailedRequests '\"' *\n| extend\n    TotalRequests=toint(TotalRequests),\n    TotalRequestsWithBearerToken=toint(TotalRequestsWithBearerToken),\n    MaxConcurrentRequests=toint(MaxConcurrentRequests),\n    TotalRequestBytes=toint(TotalRequestBytes),\n    TotalResponseBytes=toint(TotalResponseBytes),\n    FailedRequests=toint(FailedRequests)\n| project\n    TimeGenerated,\n    ServerName,\n    StartTime,\n    EndTime,\n    Endpoint,\n    ProxyServer,\n    TargetHost,\n    TotalRequests,\n    TotalRequestsWithBearerToken,\n    MaxConcurrentRequests,\n    TotalRequestBytes,\n    TotalResponseBytes,\n    FailedRequests,\n    FileName,\n    FilePath\n| where isnotempty(Endpoint)\n| extend Target_NB=tostring(split(TargetHost, \".\")[0])\n| extend TargetHost_Endpoint = strcat(Target_NB, \": \", Endpoint)\n| summarize TotalRequests = sum(TotalRequests), FailedRequests=sum(FailedRequests) by TimeGenerated, Target_NB, FileName, FilePath\n| summarize arg_max(TimeGenerated, *) by Target_NB, FileName, FilePath\n| project TimeGenerated, Target_NB, TotalRequests, FailedRequests, FileName, FilePath\n| extend FailedRequestsThreshold = round(TotalRequests * 0.2, 0)\n| extend FailedRequestPercentage = round((toreal(FailedRequests)/toreal(TotalRequests))*100),0\n| extend TimeFromNow = now() - TimeGenerated\n| extend LastStatusUpdateMinutes = toint(TimeFromNow / 1m)\n| extend LastStatusUpdate_UTC = TimeGenerated\n| project\n    Target_NB,\n    LastStatusUpdateMinutes,\n    LastStatusUpdate_UTC,\n    TotalRequests,\n    FailedRequests,\n    FailedRequestsThreshold,\n    FailedRequestPercentage,\n    FileName,\n    FilePath\n| extend Health = iff(LastStatusUpdateMinutes > 15 or TotalRequests == 0 or FailedRequests > FailedRequestsThreshold, 1, 0)\n| extend Computer = Target_NB\n| join kind=leftouter \n    (\n    Heartbeat\n    | distinct _ResourceId, Computer\n    | extend Computer=tostring(split(_ResourceId, \"/\")[8])\n    | extend Computer = tolower(Computer)\n    | project Computer, _ResourceId\n    )\n    on Computer\n| project\n    Computer,\n    tostring(LastStatusUpdate_UTC),\n    LastStatusUpdateMinutes,\n    TotalRequests,\n    FailedRequests,\n    FailedRequestsThreshold,\n    FailedRequestPercentage,\n    Health,\n    _ResourceId,\n    FileName,\n    FilePath\n\n",
+                            "timeAggregation": "Total",
+                            "metricMeasureColumn": "FailedRequestPercentage",
+                            "dimensions": [
+                                {
+                                    "name": "Computer",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                },
+                                {
+                                    "name": "FileName",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                },
+                                {
+                                    "name": "FilePath",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                }
+                            ],
+                            "resourceIdColumn": "_ResourceId",
+                            "operator": "GreaterThan",
+                            "threshold": 25,
+                            "failingPeriods": {
+                                "numberOfEvaluationPeriods": 1,
+                                "minFailingPeriodsToAlert": 1
+                            }
+                        }
+                    ]
+                },
+                "autoMitigate": true
+            }
+        },
+        {
+            "type": "microsoft.insights/scheduledqueryrules",
+            "apiVersion": "2023-03-15-preview",
+            "name": "ConfigMgr - CMG Connection Point - Less than 10 Web Socket Connections",
+            "location": "[parameters('Location')]",
+            "properties": {
+                "displayName": "ConfigMgr - CMG Connection Point - Less than 10 Web Socket Connections",
+                "description": "The CMG Connection Point has less than 10 Web Socket Connections to the CMG.",
+                "severity": 1,
+                "enabled": true,
+                "evaluationFrequency": "PT5M",
+                "scopes": [
+                    "[parameters('LogAnalyticsWorkspace')]"
+                ],
+                "targetResourceTypes": [
+                    "Microsoft.OperationalInsights/workspaces"
+                ],
+                "windowSize": "P1D",
+                "criteria": {
+                    "allOf": [
+                        {
+                            "query": "//CMG Connection Point Web Socket Connections Health\nConfigMgr_Logs_CL\n| extend Computer=tostring(split(_ResourceId, \"/\")[8])\n| extend FileName=tostring(split(FilePath, \"\\\\\")[-1])\n| project TimeGenerated, Computer, FileName, FilePath, RawData\n| where FileName == \"SMS_CLOUD_PROXYCONNECTOR.log\"\n| where RawData contains \"WebSocket connections established with proxy server\"\n//| summarize arg_max(TimeGenerated,*) by Computer\n| parse RawData with * 'There are ' WebSocketConnections ' WebSocket connections' * 'proxy server ' CMGName \":\" Port \"~~\" *\n| summarize arg_max(TimeGenerated, *) by Computer, CMGName, FileName, FilePath, Port\n| extend CMGName = tostring(split(CMGName, \".\")[0])\n| extend TimeFromNow = now() - TimeGenerated\n| extend LastStatusUpdateMinutes = toint(TimeFromNow / 1m)\n| extend LastStatusUpdate_UTC = tostring(TimeGenerated)\n| project\n    Computer,\n    CMGName,\n    Port,\n    LastStatusUpdate_UTC,\n    LastStatusUpdateMinutes,\n    WebSocketConnections,\n    FileName,\n    FilePath\n| extend Health = iff(LastStatusUpdateMinutes > 10 or WebSocketConnections != 10, 1, 0)\n| join kind=leftouter \n    (\n    Heartbeat\n    | distinct _ResourceId, Computer\n    | extend Computer=tostring(split(_ResourceId, \"/\")[8])\n    | extend Computer = tolower(Computer)\n    | project Computer, _ResourceId\n    )\n    on Computer\n| extend WebSocketConnections=toint(WebSocketConnections)\n//| where WebSocketConnections != 10\n\n",
+                            "timeAggregation": "Total",
+                            "metricMeasureColumn": "WebSocketConnections",
+                            "dimensions": [
+                                {
+                                    "name": "Computer",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                },
+                                {
+                                    "name": "CMGName",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                },
+                                {
+                                    "name": "Port",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                },
+                                {
+                                    "name": "FileName",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                },
+                                {
+                                    "name": "FilePath",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                }
+                            ],
+                            "resourceIdColumn": "_ResourceId",
+                            "operator": "LessThan",
+                            "threshold": 10,
+                            "failingPeriods": {
+                                "numberOfEvaluationPeriods": 1,
+                                "minFailingPeriodsToAlert": 1
+                            }
+                        }
+                    ]
+                },
+                "autoMitigate": true
+            }
+        },
+        {
+            "type": "microsoft.insights/scheduledqueryrules",
+            "apiVersion": "2023-03-15-preview",
+            "name": "ConfigMgr - CMG Connection Point - No requests",
+            "location": "[parameters('Location')]",
+            "properties": {
+                "displayName": "ConfigMgr - CMG Connection Point - No requests",
+                "description": "The CMG Connection Point is not receiving requests (SMS_CLOUD_PROXYCONNECTOR.log).",
+                "severity": 1,
+                "enabled": true,
+                "evaluationFrequency": "PT5M",
+                "scopes": [
+                    "[parameters('LogAnalyticsWorkspace')]"
+                ],
+                "targetResourceTypes": [
+                    "Microsoft.OperationalInsights/workspaces"
+                ],
+                "windowSize": "P1D",
+                "criteria": {
+                    "allOf": [
+                        {
+                            "query": "//CMG Connection Point Requests Health\nConfigMgr_Logs_CL\n| extend Computer=tostring(split(_ResourceId, \"/\")[8])\n| extend FileName=tostring(split(FilePath, \"\\\\\")[-1])\n| project TimeGenerated, Computer, FileName, FilePath, RawData\n| where FileName == \"SMS_CLOUD_PROXYCONNECTOR.log\"\n| where RawData contains \"ReportTrafficData - state message to send:\"\n| parse RawData with * 'ServerName=\"' ServerName '\"' * 'StartTime=\"' StartTime '\"' * 'EndTime=\"' EndTime '\"' * 'MaxConcurrentRequests=\"' MaxConcurrentRequests '\"' * '<EndPoints>' EndPoints '</EndPoints>' *\n| extend EndPoints = split(EndPoints, '~~')\n| mv-expand EndPoints\n| parse EndPoints with * 'Name=\"' Endpoint '\"' * 'ProxyServer=\"' ProxyServer '\"' * 'TargetHost=\"' TargetHost '\"' * 'TotalRequests=\"' TotalRequests '\"' * 'TotalRequestsWithBearerToken=\"' TotalRequestsWithBearerToken '\"' * 'MaxConcurrentRequests=\"' MaxConcurrentRequests '\"' * 'TotalRequestBytes=\"' TotalRequestBytes '\"' * 'TotalResponseBytes=\"' TotalResponseBytes '\"' * 'FailedRequests=\"' FailedRequests '\"' *\n| extend\n    TotalRequests=toint(TotalRequests),\n    TotalRequestsWithBearerToken=toint(TotalRequestsWithBearerToken),\n    MaxConcurrentRequests=toint(MaxConcurrentRequests),\n    TotalRequestBytes=toint(TotalRequestBytes),\n    TotalResponseBytes=toint(TotalResponseBytes),\n    FailedRequests=toint(FailedRequests)\n| project\n    TimeGenerated,\n    ServerName,\n    StartTime,\n    EndTime,\n    Endpoint,\n    ProxyServer,\n    TargetHost,\n    TotalRequests,\n    TotalRequestsWithBearerToken,\n    MaxConcurrentRequests,\n    TotalRequestBytes,\n    TotalResponseBytes,\n    FailedRequests,\n    FileName,\n    FilePath\n| where isnotempty(Endpoint)\n| extend Target_NB=tostring(split(TargetHost, \".\")[0])\n| extend TargetHost_Endpoint = strcat(Target_NB, \": \", Endpoint)\n| summarize TotalRequests = sum(TotalRequests), FailedRequests=sum(FailedRequests) by TimeGenerated, Target_NB, FileName, FilePath\n| summarize arg_max(TimeGenerated, *) by Target_NB, FileName, FilePath\n| project TimeGenerated, Target_NB, TotalRequests, FailedRequests, FileName, FilePath\n| extend FailedRequestsThreshold = round(TotalRequests * 0.2, 0)\n| extend TimeFromNow = now() - TimeGenerated\n| extend LastStatusUpdateMinutes = toint(TimeFromNow / 1m)\n| extend LastStatusUpdate_UTC = TimeGenerated\n| project\n    Target_NB,\n    LastStatusUpdateMinutes,\n    LastStatusUpdate_UTC,\n    TotalRequests,\n    FailedRequests,\n    FailedRequestsThreshold,\n    FileName,\n    FilePath\n| extend Health = iff(LastStatusUpdateMinutes > 15 or TotalRequests == 0 or FailedRequests > FailedRequestsThreshold, 1, 0)\n| extend Computer = Target_NB\n| join kind=leftouter \n    (\n    Heartbeat\n    | distinct _ResourceId, Computer\n    | extend Computer=tostring(split(_ResourceId, \"/\")[8])\n    | extend Computer = tolower(Computer)\n    | project Computer, _ResourceId\n    )\n    on Computer\n| project\n    Computer,\n    tostring(LastStatusUpdate_UTC),\n    LastStatusUpdateMinutes,\n    TotalRequests,\n    FailedRequests,\n    FailedRequestsThreshold,\n    Health,\n    _ResourceId,\n    FileName,\n    FilePath\n//| where TotalRequests == 0\n\n",
+                            "timeAggregation": "Total",
+                            "metricMeasureColumn": "TotalRequests",
+                            "dimensions": [
+                                {
+                                    "name": "Computer",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                },
+                                {
+                                    "name": "FileName",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                },
+                                {
+                                    "name": "FilePath",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                }
+                            ],
+                            "resourceIdColumn": "_ResourceId",
+                            "operator": "Equal",
+                            "threshold": 0,
+                            "failingPeriods": {
+                                "numberOfEvaluationPeriods": 1,
+                                "minFailingPeriodsToAlert": 1
+                            }
+                        }
+                    ]
+                },
+                "autoMitigate": true
+            }
+        },
+        {
+            "type": "microsoft.insights/scheduledqueryrules",
+            "apiVersion": "2023-03-15-preview",
+            "name": "ConfigMgr - CMG Connection Point - Status not written to SMS_CLOUD_PROXYCONNECTOR.log",
+            "location": "[parameters('Location')]",
+            "properties": {
+                "displayName": "ConfigMgr - CMG Connection Point - Status not written to SMS_CLOUD_PROXYCONNECTOR.log",
+                "description": "The CMG Connection Point status has not been written to the SMS_CLOUD_PROXYCONNECTOR.log file in over 15 minutes.",
+                "severity": 1,
+                "enabled": true,
+                "evaluationFrequency": "PT5M",
+                "scopes": [
+                    "[parameters('LogAnalyticsWorkspace')]"
+                ],
+                "targetResourceTypes": [
+                    "Microsoft.OperationalInsights/workspaces"
+                ],
+                "windowSize": "P1D",
+                "criteria": {
+                    "allOf": [
+                        {
+                            "query": "//CMG Connection Point Requests Health\nConfigMgr_Logs_CL\n| extend Computer=tostring(split(_ResourceId, \"/\")[8])\n| extend FileName=tostring(split(FilePath, \"\\\\\")[-1])\n| project TimeGenerated, Computer, FileName, FilePath, RawData\n| where FileName == \"SMS_CLOUD_PROXYCONNECTOR.log\"\n| where RawData contains \"ReportTrafficData - state message to send:\"\n| parse RawData with * 'ServerName=\"' ServerName '\"' * 'StartTime=\"' StartTime '\"' * 'EndTime=\"' EndTime '\"' * 'MaxConcurrentRequests=\"' MaxConcurrentRequests '\"' * '<EndPoints>' EndPoints '</EndPoints>' *\n| extend EndPoints = split(EndPoints, '~~')\n| mv-expand EndPoints\n| parse EndPoints with * 'Name=\"' Endpoint '\"' * 'ProxyServer=\"' ProxyServer '\"' * 'TargetHost=\"' TargetHost '\"' * 'TotalRequests=\"' TotalRequests '\"' * 'TotalRequestsWithBearerToken=\"' TotalRequestsWithBearerToken '\"' * 'MaxConcurrentRequests=\"' MaxConcurrentRequests '\"' * 'TotalRequestBytes=\"' TotalRequestBytes '\"' * 'TotalResponseBytes=\"' TotalResponseBytes '\"' * 'FailedRequests=\"' FailedRequests '\"' *\n| extend\n    TotalRequests=toint(TotalRequests),\n    TotalRequestsWithBearerToken=toint(TotalRequestsWithBearerToken),\n    MaxConcurrentRequests=toint(MaxConcurrentRequests),\n    TotalRequestBytes=toint(TotalRequestBytes),\n    TotalResponseBytes=toint(TotalResponseBytes),\n    FailedRequests=toint(FailedRequests)\n| project\n    TimeGenerated,\n    ServerName,\n    StartTime,\n    EndTime,\n    Endpoint,\n    ProxyServer,\n    TargetHost,\n    TotalRequests,\n    TotalRequestsWithBearerToken,\n    MaxConcurrentRequests,\n    TotalRequestBytes,\n    TotalResponseBytes,\n    FailedRequests,\n    FileName,\n    FilePath\n| where isnotempty(Endpoint)\n| extend Target_NB=tostring(split(TargetHost, \".\")[0])\n| extend TargetHost_Endpoint = strcat(Target_NB, \": \", Endpoint)\n| summarize TotalRequests = sum(TotalRequests), FailedRequests=sum(FailedRequests) by TimeGenerated, Target_NB, FileName, FilePath\n| summarize arg_max(TimeGenerated, *) by Target_NB, FileName, FilePath\n| project TimeGenerated, Target_NB, TotalRequests, FailedRequests, FileName, FilePath\n| extend FailedRequestsThreshold = round(TotalRequests * 0.2, 0)\n| extend TimeFromNow = now() - TimeGenerated\n| extend LastStatusUpdateMinutes = toint(TimeFromNow / 1m)\n| extend LastStatusUpdate_UTC = TimeGenerated\n| project\n    Target_NB,\n    LastStatusUpdateMinutes,\n    LastStatusUpdate_UTC,\n    TotalRequests,\n    FailedRequests,\n    FailedRequestsThreshold,\n    FileName,\n    FilePath\n| extend Health = iff(LastStatusUpdateMinutes > 15 or TotalRequests == 0 or FailedRequests > FailedRequestsThreshold, 1, 0)\n| extend Computer = Target_NB\n| join kind=leftouter \n    (\n    Heartbeat\n    | distinct _ResourceId, Computer\n    | extend Computer=tostring(split(_ResourceId, \"/\")[8])\n    | extend Computer = tolower(Computer)\n    | project Computer, _ResourceId\n    )\n    on Computer\n| project\n    Computer,\n    tostring(LastStatusUpdate_UTC),\n    LastStatusUpdateMinutes,\n    TotalRequests,\n    FailedRequests,\n    FailedRequestsThreshold,\n    Health,\n    _ResourceId,\n    FileName,\n    FilePath\n//| where LastStatusUpdateMinutes > 15\n\n",
+                            "timeAggregation": "Total",
+                            "metricMeasureColumn": "LastStatusUpdateMinutes",
+                            "dimensions": [
+                                {
+                                    "name": "Computer",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                },
+                                {
+                                    "name": "LastStatusUpdate_UTC",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                },
+                                {
+                                    "name": "FileName",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                },
+                                {
+                                    "name": "FilePath",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                }
+                            ],
+                            "resourceIdColumn": "_ResourceId",
+                            "operator": "GreaterThan",
+                            "threshold": 15,
+                            "failingPeriods": {
+                                "numberOfEvaluationPeriods": 1,
+                                "minFailingPeriodsToAlert": 1
+                            }
+                        }
+                    ]
+                },
+                "autoMitigate": true
+            }
+        },
+        {
+            "type": "microsoft.insights/scheduledqueryrules",
+            "apiVersion": "2023-03-15-preview",
+            "name": "ConfigMgr - CMG Connection Point - Web Socket Status not written to SMS_CLOUD_PROXYCONNECTOR.log",
+            "location": "[parameters('Location')]",
+            "properties": {
+                "displayName": "ConfigMgr - CMG Connection Point - Web Socket Status not written to SMS_CLOUD_PROXYCONNECTOR.log",
+                "description": "The CMG Connection Point Web Socket status has not been written to the SMS_CLOUD_PROXYCONNECTOR.log file in over 10 minutes.",
+                "severity": 1,
+                "enabled": true,
+                "evaluationFrequency": "PT5M",
+                "scopes": [
+                    "[parameters('LogAnalyticsWorkspace')]"
+                ],
+                "targetResourceTypes": [
+                    "Microsoft.OperationalInsights/workspaces"
+                ],
+                "windowSize": "P1D",
+                "criteria": {
+                    "allOf": [
+                        {
+                            "query": "//CMG Connection Point Web Socket Connections Health\nConfigMgr_Logs_CL\n| extend Computer=tostring(split(_ResourceId, \"/\")[8])\n| extend FileName=tostring(split(FilePath, \"\\\\\")[-1])\n| project TimeGenerated, Computer, FileName, FilePath, RawData\n| where FileName == \"SMS_CLOUD_PROXYCONNECTOR.log\"\n| where RawData contains \"WebSocket connections established with proxy server\"\n//| summarize arg_max(TimeGenerated,*) by Computer\n| parse RawData with * 'There are ' WebSocketConnections ' WebSocket connections' * 'proxy server ' CMGName \":\" Port \"~~\" *\n| summarize arg_max(TimeGenerated, *) by Computer, CMGName, FileName, FilePath//,Port\n| extend CMGName = tostring(split(CMGName, \".\")[0])\n| extend TimeFromNow = now() - TimeGenerated\n| extend LastStatusUpdateMinutes = toint(TimeFromNow / 1m)\n| extend LastStatusUpdate_UTC = tostring(TimeGenerated)\n| project\n    Computer,\n    CMGName,\n    Port,\n    LastStatusUpdate_UTC,\n    LastStatusUpdateMinutes,\n    WebSocketConnections,\n    FileName,\n    FilePath\n| extend Health = iff(LastStatusUpdateMinutes > 10 or WebSocketConnections != 10, 1, 0)\n| join kind=leftouter \n    (\n    Heartbeat\n    | distinct _ResourceId, Computer\n    | extend Computer=tostring(split(_ResourceId, \"/\")[8])\n    | extend Computer = tolower(Computer)\n    | project Computer, _ResourceId\n    )\n    on Computer\n//| where LastStatusUpdateMinutes > 10\n\n",
+                            "timeAggregation": "Total",
+                            "metricMeasureColumn": "LastStatusUpdateMinutes",
+                            "dimensions": [
+                                {
+                                    "name": "Computer",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                },
+                                {
+                                    "name": "CMGName",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                },
+                                {
+                                    "name": "Port",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                },
+                                {
+                                    "name": "LastStatusUpdate_UTC",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                },
+                                {
+                                    "name": "FileName",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                },
+                                {
+                                    "name": "FilePath",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                }
+                            ],
+                            "resourceIdColumn": "_ResourceId",
+                            "operator": "GreaterThan",
+                            "threshold": 10,
+                            "failingPeriods": {
+                                "numberOfEvaluationPeriods": 1,
+                                "minFailingPeriodsToAlert": 1
+                            }
+                        }
+                    ]
+                },
+                "autoMitigate": true
+            }
+        },
+        {
+            "type": "microsoft.insights/scheduledqueryrules",
+            "apiVersion": "2023-03-15-preview",
+            "name": "ConfigMgr - Management Point - No Connected Clients",
+            "location": "[parameters('Location')]",
+            "properties": {
+                "displayName": "ConfigMgr - Management Point - No Connected Clients",
+                "description": "No clients are connected to the Management Point. The SMS Notification Server\\Total online clients counter has been 0 for 15 minutes.",
+                "severity": 1,
+                "enabled": true,
+                "evaluationFrequency": "PT5M",
+                "scopes": [
+                    "[parameters('LogAnalyticsWorkspace')]"
+                ],
+                "targetResourceTypes": [
+                    "Microsoft.OperationalInsights/workspaces"
+                ],
+                "windowSize": "P1D",
+                "criteria": {
+                    "allOf": [
+                        {
+                            "query": "[concat('let ResourceGroup = \"',parameters('ConfigMgrResourceGroupName'),'\";\nPerf\n| where _ResourceId contains ResourceGroup\n| where ObjectName == \"SMS Notification Server\" and CounterName == \"Total online clients\"\n| summarize AvgClients = avg(CounterValue) by bin(TimeGenerated, 15m), Computer, _ResourceId\n| summarize LastCount = arg_max(TimeGenerated, *) by Computer, _ResourceId\n//| where AvgClients == 0\n\n')]",
+                            "timeAggregation": "Average",
+                            "metricMeasureColumn": "AvgClients",
+                            "dimensions": [
+                                {
+                                    "name": "Computer",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                }
+                            ],
+                            "resourceIdColumn": "_ResourceId",
+                            "operator": "Equal",
+                            "threshold": 0,
+                            "failingPeriods": {
+                                "numberOfEvaluationPeriods": 1,
+                                "minFailingPeriodsToAlert": 1
+                            }
+                        }
+                    ]
+                },
+                "autoMitigate": true
+            }
+        },
+        {
+            "type": "microsoft.insights/scheduledqueryrules",
+            "apiVersion": "2023-03-15-preview",
+            "name": "ConfigMgr - Management Point - No Successful Certificate Validation",
+            "location": "[parameters('Location')]",
+            "properties": {
+                "displayName": "ConfigMgr - Management Point - No Successful Certificate Validation",
+                "description": "The last successful Certificate Validation was over 45 minutes ago (mpcontrol.log).",
+                "severity": 1,
+                "enabled": true,
+                "evaluationFrequency": "PT5M",
+                "scopes": [
+                    "[parameters('LogAnalyticsWorkspace')]"
+                ],
+                "targetResourceTypes": [
+                    "Microsoft.OperationalInsights/workspaces"
+                ],
+                "windowSize": "P1D",
+                "criteria": {
+                    "allOf": [
+                        {
+                            "query": "//Management Point Health Checks Health\n//List of Management Points\nConfigMgr_Logs_CL\n| extend Computer=tostring(split(_ResourceId, \"/\")[8])\n| extend FileName=tostring(split(FilePath, \"\\\\\")[-1])\n| where FileName == \"mpcontrol.log\"\n| summarize by Computer\n| join kind=leftouter(\n    //MP Availability Check\n    ConfigMgr_Logs_CL\n    | extend Computer=tostring(split(_ResourceId, \"/\")[8])\n    | extend FileName=tostring(split(FilePath, \"\\\\\")[-1])\n    | where FileName == \"mpcontrol.log\"\n    | where RawData contains \"Successfully performed Management Point availability check against local computer\"\n    | summarize LastMPAvailabilityCheckTime = max(TimeGenerated) by Computer\n    | extend LastMPAvailabilityCheckMinutes = datetime_diff('minute', now(), LastMPAvailabilityCheckTime)\n    )\n    on Computer\n| join kind=leftouter(\n    //User Service Availability Check\n    ConfigMgr_Logs_CL\n    | extend Computer=tostring(split(_ResourceId, \"/\")[8])\n    | extend FileName=tostring(split(FilePath, \"\\\\\")[-1])\n    | where FileName == \"mpcontrol.log\"\n    | where RawData contains \"Successfully performed User Service availability check against local computer\"\n    | summarize LastUserServiceAvailabilityCheckTime = max(TimeGenerated) by Computer\n    | extend LastUserServiceAvailabilityCheckMinutes = datetime_diff('minute', now(), LastUserServiceAvailabilityCheckTime)\n    )\n    on Computer\n| join kind=leftouter(\n    //HTTP Send Request Sync\n    ConfigMgr_Logs_CL\n    | extend Computer=tostring(split(_ResourceId, \"/\")[8])\n    | extend FileName=tostring(split(FilePath, \"\\\\\")[-1])\n    | where FileName == \"mpcontrol.log\"\n    | where RawData contains \"Call to HttpSendRequestSync succeeded\"\n    | summarize LastHTTPSendRequestSyncTime = max(TimeGenerated) by Computer\n    | extend LastHTTPSendRequestSyncMinutes = datetime_diff('minute', now(), LastHTTPSendRequestSyncTime)\n    )\n    on Computer\n| join kind=leftouter(\n    //HTTP Test Request\n    ConfigMgr_Logs_CL\n    | extend Computer=tostring(split(_ResourceId, \"/\")[8])\n    | extend FileName=tostring(split(FilePath, \"\\\\\")[-1])\n    | where FileName == \"mpcontrol.log\"\n    | where RawData contains \"Http test request succeeded\"\n    | summarize LastHTTPTestRequestTime = max(TimeGenerated) by Computer\n    | extend LastHTTPTestRequestMinutes = datetime_diff('minute', now(), LastHTTPTestRequestTime)\n    )\n    on Computer\n| join kind=leftouter(\n    //Certificate Validation\n    ConfigMgr_Logs_CL\n    | extend Computer=tostring(split(_ResourceId, \"/\")[8])\n    | extend FileName=tostring(split(FilePath, \"\\\\\")[-1])\n    | where FileName == \"mpcontrol.log\"\n    | where RawData contains \"Completed validation of Certificate\"\n    | summarize LastCertValidationTime = max(TimeGenerated) by Computer\n    | extend LastCertValidationMinutes = datetime_diff('minute', now(), LastCertValidationTime)\n    )\n    on Computer\n| extend LastMPAvailabilityCheckMinutes = iif(isnull(LastMPAvailabilityCheckTime), -111, LastMPAvailabilityCheckMinutes)\n| extend LastUserServiceAvailabilityCheckMinutes = iif(isnull(LastUserServiceAvailabilityCheckTime), -111, LastUserServiceAvailabilityCheckMinutes)\n| extend LastHTTPSendRequestSyncMinutes = iif(isnull(LastHTTPSendRequestSyncTime), -111, LastHTTPSendRequestSyncMinutes)\n| extend LastHTTPTestRequestMinutes = iif(isnull(LastHTTPTestRequestTime), -111, LastHTTPTestRequestMinutes)\n| extend LastCertValidationMinutes = iif(isnull(LastCertValidationTime), -111, LastCertValidationMinutes)\n//| project Computer,LastMPAvailabilityCheckMinutes,LastUserServiceAvailabilityCheckMinutes,LastHTTPSendRequestSyncMinutes,LastHTTPTestRequestMinutes,LastCertValidationMinutes\n| extend Health = iff(LastMPAvailabilityCheckMinutes > 10 or LastUserServiceAvailabilityCheckMinutes > 10 or LastHTTPSendRequestSyncMinutes > 10 or LastHTTPTestRequestMinutes > 10 or LastCertValidationMinutes > 45, 1, 0)\n| join kind=leftouter \n    (\n    Heartbeat\n    | distinct _ResourceId, Computer\n    | extend Computer=tostring(split(_ResourceId, \"/\")[8])\n    | extend Computer = tolower(Computer)\n    | project Computer, _ResourceId\n    )\n    on Computer\n| project\n    Computer,\n    tostring(LastMPAvailabilityCheckTime),\n    LastMPAvailabilityCheckMinutes,\n    tostring(LastUserServiceAvailabilityCheckTime),\n    LastUserServiceAvailabilityCheckMinutes,\n    tostring(LastHTTPSendRequestSyncTime),\n    LastHTTPSendRequestSyncMinutes,\n    tostring(LastHTTPTestRequestTime),\n    LastHTTPTestRequestMinutes,\n    tostring(LastCertValidationTime),\n    LastCertValidationMinutes,\n    _ResourceId\n//| where LastCertValidationMinutes > 45\n\n",
+                            "timeAggregation": "Total",
+                            "metricMeasureColumn": "LastCertValidationMinutes",
+                            "dimensions": [
+                                {
+                                    "name": "Computer",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                },
+                                {
+                                    "name": "LastCertValidationTime",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                }
+                            ],
+                            "resourceIdColumn": "_ResourceId",
+                            "operator": "GreaterThan",
+                            "threshold": 45,
+                            "failingPeriods": {
+                                "numberOfEvaluationPeriods": 1,
+                                "minFailingPeriodsToAlert": 1
+                            }
+                        }
+                    ]
+                },
+                "autoMitigate": true
+            }
+        },
+        {
+            "type": "microsoft.insights/scheduledqueryrules",
+            "apiVersion": "2023-03-15-preview",
+            "name": "ConfigMgr - Management Point - No Successful HTTP Send Request Sync",
+            "location": "[parameters('Location')]",
+            "properties": {
+                "displayName": "ConfigMgr - Management Point - No Successful HTTP Send Request Sync",
+                "description": "The last successful HTTP Send Request Sync was over 10 minutes ago (mpcontrol.log).",
+                "severity": 1,
+                "enabled": true,
+                "evaluationFrequency": "PT5M",
+                "scopes": [
+                    "[parameters('LogAnalyticsWorkspace')]"
+                ],
+                "targetResourceTypes": [
+                    "Microsoft.OperationalInsights/workspaces"
+                ],
+                "windowSize": "P1D",
+                "criteria": {
+                    "allOf": [
+                        {
+                            "query": "//Management Point Health Checks Health\n//List of Management Points\nConfigMgr_Logs_CL\n| extend Computer=tostring(split(_ResourceId, \"/\")[8])\n| extend FileName=tostring(split(FilePath, \"\\\\\")[-1])\n| where FileName == \"mpcontrol.log\"\n| summarize by Computer\n| join kind=leftouter(\n    //MP Availability Check\n    ConfigMgr_Logs_CL\n    | extend Computer=tostring(split(_ResourceId, \"/\")[8])\n    | extend FileName=tostring(split(FilePath, \"\\\\\")[-1])\n    | where FileName == \"mpcontrol.log\"\n    | where RawData contains \"Successfully performed Management Point availability check against local computer\"\n    | summarize LastMPAvailabilityCheckTime = max(TimeGenerated) by Computer\n    | extend LastMPAvailabilityCheckMinutes = datetime_diff('minute', now(), LastMPAvailabilityCheckTime)\n    )\n    on Computer\n| join kind=leftouter(\n    //User Service Availability Check\n    ConfigMgr_Logs_CL\n    | extend Computer=tostring(split(_ResourceId, \"/\")[8])\n    | extend FileName=tostring(split(FilePath, \"\\\\\")[-1])\n    | where FileName == \"mpcontrol.log\"\n    | where RawData contains \"Successfully performed User Service availability check against local computer\"\n    | summarize LastUserServiceAvailabilityCheckTime = max(TimeGenerated) by Computer\n    | extend LastUserServiceAvailabilityCheckMinutes = datetime_diff('minute', now(), LastUserServiceAvailabilityCheckTime)\n    )\n    on Computer\n| join kind=leftouter(\n    //HTTP Send Request Sync\n    ConfigMgr_Logs_CL\n    | extend Computer=tostring(split(_ResourceId, \"/\")[8])\n    | extend FileName=tostring(split(FilePath, \"\\\\\")[-1])\n    | where FileName == \"mpcontrol.log\"\n    | where RawData contains \"Call to HttpSendRequestSync succeeded\"\n    | summarize LastHTTPSendRequestSyncTime = max(TimeGenerated) by Computer\n    | extend LastHTTPSendRequestSyncMinutes = datetime_diff('minute', now(), LastHTTPSendRequestSyncTime)\n    )\n    on Computer\n| join kind=leftouter(\n    //HTTP Test Request\n    ConfigMgr_Logs_CL\n    | extend Computer=tostring(split(_ResourceId, \"/\")[8])\n    | extend FileName=tostring(split(FilePath, \"\\\\\")[-1])\n    | where FileName == \"mpcontrol.log\"\n    | where RawData contains \"Http test request succeeded\"\n    | summarize LastHTTPTestRequestTime = max(TimeGenerated) by Computer\n    | extend LastHTTPTestRequestMinutes = datetime_diff('minute', now(), LastHTTPTestRequestTime)\n    )\n    on Computer\n| join kind=leftouter(\n    //Certificate Validation\n    ConfigMgr_Logs_CL\n    | extend Computer=tostring(split(_ResourceId, \"/\")[8])\n    | extend FileName=tostring(split(FilePath, \"\\\\\")[-1])\n    | where FileName == \"mpcontrol.log\"\n    | where RawData contains \"Completed validation of Certificate\"\n    | summarize LastCertValidationTime = max(TimeGenerated) by Computer\n    | extend LastCertValidationMinutes = datetime_diff('minute', now(), LastCertValidationTime)\n    )\n    on Computer\n| extend LastMPAvailabilityCheckMinutes = iif(isnull(LastMPAvailabilityCheckTime), -111, LastMPAvailabilityCheckMinutes)\n| extend LastUserServiceAvailabilityCheckMinutes = iif(isnull(LastUserServiceAvailabilityCheckTime), -111, LastUserServiceAvailabilityCheckMinutes)\n| extend LastHTTPSendRequestSyncMinutes = iif(isnull(LastHTTPSendRequestSyncTime), -111, LastHTTPSendRequestSyncMinutes)\n| extend LastHTTPTestRequestMinutes = iif(isnull(LastHTTPTestRequestTime), -111, LastHTTPTestRequestMinutes)\n| extend LastCertValidationMinutes = iif(isnull(LastCertValidationTime), -111, LastCertValidationMinutes)\n//| project Computer,LastMPAvailabilityCheckMinutes,LastUserServiceAvailabilityCheckMinutes,LastHTTPSendRequestSyncMinutes,LastHTTPTestRequestMinutes,LastCertValidationMinutes\n| extend Health = iff(LastMPAvailabilityCheckMinutes > 10 or LastUserServiceAvailabilityCheckMinutes > 10 or LastHTTPSendRequestSyncMinutes > 10 or LastHTTPTestRequestMinutes > 10 or LastCertValidationMinutes > 45, 1, 0)\n| join kind=leftouter \n    (\n    Heartbeat\n    | distinct _ResourceId, Computer\n    | extend Computer=tostring(split(_ResourceId, \"/\")[8])\n    | extend Computer = tolower(Computer)\n    | project Computer, _ResourceId\n    )\n    on Computer\n| project\n    Computer,\n    tostring(LastMPAvailabilityCheckTime),\n    LastMPAvailabilityCheckMinutes,\n    tostring(LastUserServiceAvailabilityCheckTime),\n    LastUserServiceAvailabilityCheckMinutes,\n    tostring(LastHTTPSendRequestSyncTime),\n    LastHTTPSendRequestSyncMinutes,\n    tostring(LastHTTPTestRequestTime),\n    LastHTTPTestRequestMinutes,\n    tostring(LastCertValidationTime),\n    LastCertValidationMinutes,\n    _ResourceId\n//| where LastHTTPSendRequestSyncMinutes > 10\n\n",
+                            "timeAggregation": "Total",
+                            "metricMeasureColumn": "LastHTTPSendRequestSyncMinutes",
+                            "dimensions": [
+                                {
+                                    "name": "Computer",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                },
+                                {
+                                    "name": "LastHTTPSendRequestSyncTime",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                }
+                            ],
+                            "resourceIdColumn": "_ResourceId",
+                            "operator": "GreaterThan",
+                            "threshold": 10,
+                            "failingPeriods": {
+                                "numberOfEvaluationPeriods": 1,
+                                "minFailingPeriodsToAlert": 1
+                            }
+                        }
+                    ]
+                },
+                "autoMitigate": true
+            }
+        },
+        {
+            "type": "microsoft.insights/scheduledqueryrules",
+            "apiVersion": "2023-03-15-preview",
+            "name": "ConfigMgr - Management Point - No Successful HTTP Test Request",
+            "location": "[parameters('Location')]",
+            "properties": {
+                "displayName": "ConfigMgr - Management Point - No Successful HTTP Test Request",
+                "description": "The last successful HTTP Test Request was over 10 minutes ago (mpcontrol.log).",
+                "severity": 1,
+                "enabled": true,
+                "evaluationFrequency": "PT5M",
+                "scopes": [
+                    "[parameters('LogAnalyticsWorkspace')]"
+                ],
+                "targetResourceTypes": [
+                    "Microsoft.OperationalInsights/workspaces"
+                ],
+                "windowSize": "P1D",
+                "criteria": {
+                    "allOf": [
+                        {
+                            "query": "//Management Point Health Checks Health\n//List of Management Points\nConfigMgr_Logs_CL\n| extend Computer=tostring(split(_ResourceId, \"/\")[8])\n| extend FileName=tostring(split(FilePath, \"\\\\\")[-1])\n| where FileName == \"mpcontrol.log\"\n| summarize by Computer\n| join kind=leftouter(\n    //MP Availability Check\n    ConfigMgr_Logs_CL\n    | extend Computer=tostring(split(_ResourceId, \"/\")[8])\n    | extend FileName=tostring(split(FilePath, \"\\\\\")[-1])\n    | where FileName == \"mpcontrol.log\"\n    | where RawData contains \"Successfully performed Management Point availability check against local computer\"\n    | summarize LastMPAvailabilityCheckTime = max(TimeGenerated) by Computer\n    | extend LastMPAvailabilityCheckMinutes = datetime_diff('minute', now(), LastMPAvailabilityCheckTime)\n    )\n    on Computer\n| join kind=leftouter(\n    //User Service Availability Check\n    ConfigMgr_Logs_CL\n    | extend Computer=tostring(split(_ResourceId, \"/\")[8])\n    | extend FileName=tostring(split(FilePath, \"\\\\\")[-1])\n    | where FileName == \"mpcontrol.log\"\n    | where RawData contains \"Successfully performed User Service availability check against local computer\"\n    | summarize LastUserServiceAvailabilityCheckTime = max(TimeGenerated) by Computer\n    | extend LastUserServiceAvailabilityCheckMinutes = datetime_diff('minute', now(), LastUserServiceAvailabilityCheckTime)\n    )\n    on Computer\n| join kind=leftouter(\n    //HTTP Send Request Sync\n    ConfigMgr_Logs_CL\n    | extend Computer=tostring(split(_ResourceId, \"/\")[8])\n    | extend FileName=tostring(split(FilePath, \"\\\\\")[-1])\n    | where FileName == \"mpcontrol.log\"\n    | where RawData contains \"Call to HttpSendRequestSync succeeded\"\n    | summarize LastHTTPSendRequestSyncTime = max(TimeGenerated) by Computer\n    | extend LastHTTPSendRequestSyncMinutes = datetime_diff('minute', now(), LastHTTPSendRequestSyncTime)\n    )\n    on Computer\n| join kind=leftouter(\n    //HTTP Test Request\n    ConfigMgr_Logs_CL\n    | extend Computer=tostring(split(_ResourceId, \"/\")[8])\n    | extend FileName=tostring(split(FilePath, \"\\\\\")[-1])\n    | where FileName == \"mpcontrol.log\"\n    | where RawData contains \"Http test request succeeded\"\n    | summarize LastHTTPTestRequestTime = max(TimeGenerated) by Computer\n    | extend LastHTTPTestRequestMinutes = datetime_diff('minute', now(), LastHTTPTestRequestTime)\n    )\n    on Computer\n| join kind=leftouter(\n    //Certificate Validation\n    ConfigMgr_Logs_CL\n    | extend Computer=tostring(split(_ResourceId, \"/\")[8])\n    | extend FileName=tostring(split(FilePath, \"\\\\\")[-1])\n    | where FileName == \"mpcontrol.log\"\n    | where RawData contains \"Completed validation of Certificate\"\n    | summarize LastCertValidationTime = max(TimeGenerated) by Computer\n    | extend LastCertValidationMinutes = datetime_diff('minute', now(), LastCertValidationTime)\n    )\n    on Computer\n| extend LastMPAvailabilityCheckMinutes = iif(isnull(LastMPAvailabilityCheckTime), -111, LastMPAvailabilityCheckMinutes)\n| extend LastUserServiceAvailabilityCheckMinutes = iif(isnull(LastUserServiceAvailabilityCheckTime), -111, LastUserServiceAvailabilityCheckMinutes)\n| extend LastHTTPSendRequestSyncMinutes = iif(isnull(LastHTTPSendRequestSyncTime), -111, LastHTTPSendRequestSyncMinutes)\n| extend LastHTTPTestRequestMinutes = iif(isnull(LastHTTPTestRequestTime), -111, LastHTTPTestRequestMinutes)\n| extend LastCertValidationMinutes = iif(isnull(LastCertValidationTime), -111, LastCertValidationMinutes)\n//| project Computer,LastMPAvailabilityCheckMinutes,LastUserServiceAvailabilityCheckMinutes,LastHTTPSendRequestSyncMinutes,LastHTTPTestRequestMinutes,LastCertValidationMinutes\n| extend Health = iff(LastMPAvailabilityCheckMinutes > 10 or LastUserServiceAvailabilityCheckMinutes > 10 or LastHTTPSendRequestSyncMinutes > 10 or LastHTTPTestRequestMinutes > 10 or LastCertValidationMinutes > 45, 1, 0)\n| join kind=leftouter \n    (\n    Heartbeat\n    | distinct _ResourceId, Computer\n    | extend Computer=tostring(split(_ResourceId, \"/\")[8])\n    | extend Computer = tolower(Computer)\n    | project Computer, _ResourceId\n    )\n    on Computer\n| project\n    Computer,\n    tostring(LastMPAvailabilityCheckTime),\n    LastMPAvailabilityCheckMinutes,\n    tostring(LastUserServiceAvailabilityCheckTime),\n    LastUserServiceAvailabilityCheckMinutes,\n    tostring(LastHTTPSendRequestSyncTime),\n    LastHTTPSendRequestSyncMinutes,\n    tostring(LastHTTPTestRequestTime),\n    LastHTTPTestRequestMinutes,\n    tostring(LastCertValidationTime),\n    LastCertValidationMinutes,\n    _ResourceId\n//| where LastHTTPTestRequestMinutes > 10\n\n",
+                            "timeAggregation": "Total",
+                            "metricMeasureColumn": "LastHTTPTestRequestMinutes",
+                            "dimensions": [
+                                {
+                                    "name": "Computer",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                },
+                                {
+                                    "name": "LastHTTPTestRequestTime",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                }
+                            ],
+                            "resourceIdColumn": "_ResourceId",
+                            "operator": "GreaterThan",
+                            "threshold": 10,
+                            "failingPeriods": {
+                                "numberOfEvaluationPeriods": 1,
+                                "minFailingPeriodsToAlert": 1
+                            }
+                        }
+                    ]
+                },
+                "autoMitigate": true
+            }
+        },
+        {
+            "type": "microsoft.insights/scheduledqueryrules",
+            "apiVersion": "2023-03-15-preview",
+            "name": "ConfigMgr - Management Point - No Successful MP Availability Check",
+            "location": "[parameters('Location')]",
+            "properties": {
+                "displayName": "ConfigMgr - Management Point - No Successful MP Availability Check",
+                "description": "The last successful MP Availability check was over 10 minutes ago (mpcontrol.log).",
+                "severity": 1,
+                "enabled": true,
+                "evaluationFrequency": "PT5M",
+                "scopes": [
+                    "[parameters('LogAnalyticsWorkspace')]"
+                ],
+                "targetResourceTypes": [
+                    "Microsoft.OperationalInsights/workspaces"
+                ],
+                "windowSize": "P1D",
+                "criteria": {
+                    "allOf": [
+                        {
+                            "query": "//Management Point Health Checks Health\n//List of Management Points\nConfigMgr_Logs_CL\n| extend Computer=tostring(split(_ResourceId, \"/\")[8])\n| extend FileName=tostring(split(FilePath, \"\\\\\")[-1])\n| where FileName == \"mpcontrol.log\"\n| summarize by Computer\n| join kind=leftouter(\n    //MP Availability Check\n    ConfigMgr_Logs_CL\n    | extend Computer=tostring(split(_ResourceId, \"/\")[8])\n    | extend FileName=tostring(split(FilePath, \"\\\\\")[-1])\n    | where FileName == \"mpcontrol.log\"\n    | where RawData contains \"Successfully performed Management Point availability check against local computer\"\n    | summarize LastMPAvailabilityCheckTime = max(TimeGenerated) by Computer\n    | extend LastMPAvailabilityCheckMinutes = datetime_diff('minute', now(), LastMPAvailabilityCheckTime)\n    )\n    on Computer\n| join kind=leftouter(\n    //User Service Availability Check\n    ConfigMgr_Logs_CL\n    | extend Computer=tostring(split(_ResourceId, \"/\")[8])\n    | extend FileName=tostring(split(FilePath, \"\\\\\")[-1])\n    | where FileName == \"mpcontrol.log\"\n    | where RawData contains \"Successfully performed User Service availability check against local computer\"\n    | summarize LastUserServiceAvailabilityCheckTime = max(TimeGenerated) by Computer\n    | extend LastUserServiceAvailabilityCheckMinutes = datetime_diff('minute', now(), LastUserServiceAvailabilityCheckTime)\n    )\n    on Computer\n| join kind=leftouter(\n    //HTTP Send Request Sync\n    ConfigMgr_Logs_CL\n    | extend Computer=tostring(split(_ResourceId, \"/\")[8])\n    | extend FileName=tostring(split(FilePath, \"\\\\\")[-1])\n    | where FileName == \"mpcontrol.log\"\n    | where RawData contains \"Call to HttpSendRequestSync succeeded\"\n    | summarize LastHTTPSendRequestSyncTime = max(TimeGenerated) by Computer\n    | extend LastHTTPSendRequestSyncMinutes = datetime_diff('minute', now(), LastHTTPSendRequestSyncTime)\n    )\n    on Computer\n| join kind=leftouter(\n    //HTTP Test Request\n    ConfigMgr_Logs_CL\n    | extend Computer=tostring(split(_ResourceId, \"/\")[8])\n    | extend FileName=tostring(split(FilePath, \"\\\\\")[-1])\n    | where FileName == \"mpcontrol.log\"\n    | where RawData contains \"Http test request succeeded\"\n    | summarize LastHTTPTestRequestTime = max(TimeGenerated) by Computer\n    | extend LastHTTPTestRequestMinutes = datetime_diff('minute', now(), LastHTTPTestRequestTime)\n    )\n    on Computer\n| join kind=leftouter(\n    //Certificate Validation\n    ConfigMgr_Logs_CL\n    | extend Computer=tostring(split(_ResourceId, \"/\")[8])\n    | extend FileName=tostring(split(FilePath, \"\\\\\")[-1])\n    | where FileName == \"mpcontrol.log\"\n    | where RawData contains \"Completed validation of Certificate\"\n    | summarize LastCertValidationTime = max(TimeGenerated) by Computer\n    | extend LastCertValidationMinutes = datetime_diff('minute', now(), LastCertValidationTime)\n    )\n    on Computer\n| extend LastMPAvailabilityCheckMinutes = iif(isnull(LastMPAvailabilityCheckTime), -111, LastMPAvailabilityCheckMinutes)\n| extend LastUserServiceAvailabilityCheckMinutes = iif(isnull(LastUserServiceAvailabilityCheckTime), -111, LastUserServiceAvailabilityCheckMinutes)\n| extend LastHTTPSendRequestSyncMinutes = iif(isnull(LastHTTPSendRequestSyncTime), -111, LastHTTPSendRequestSyncMinutes)\n| extend LastHTTPTestRequestMinutes = iif(isnull(LastHTTPTestRequestTime), -111, LastHTTPTestRequestMinutes)\n| extend LastCertValidationMinutes = iif(isnull(LastCertValidationTime), -111, LastCertValidationMinutes)\n//| project Computer,LastMPAvailabilityCheckMinutes,LastUserServiceAvailabilityCheckMinutes,LastHTTPSendRequestSyncMinutes,LastHTTPTestRequestMinutes,LastCertValidationMinutes\n| extend Health = iff(LastMPAvailabilityCheckMinutes > 10 or LastUserServiceAvailabilityCheckMinutes > 10 or LastHTTPSendRequestSyncMinutes > 10 or LastHTTPTestRequestMinutes > 10 or LastCertValidationMinutes > 45, 1, 0)\n| join kind=leftouter \n    (\n    Heartbeat\n    | distinct _ResourceId, Computer\n    | extend Computer=tostring(split(_ResourceId, \"/\")[8])\n    | extend Computer = tolower(Computer)\n    | project Computer, _ResourceId\n    )\n    on Computer\n| project\n    Computer,\n    tostring(LastMPAvailabilityCheckTime),\n    LastMPAvailabilityCheckMinutes,\n    tostring(LastUserServiceAvailabilityCheckTime),\n    LastUserServiceAvailabilityCheckMinutes,\n    tostring(LastHTTPSendRequestSyncTime),\n    LastHTTPSendRequestSyncMinutes,\n    tostring(LastHTTPTestRequestTime),\n    LastHTTPTestRequestMinutes,\n    tostring(LastCertValidationTime),\n    LastCertValidationMinutes,\n    _ResourceId\n//| where LastMPAvailabilityCheckMinutes > 10\n\n",
+                            "timeAggregation": "Total",
+                            "metricMeasureColumn": "LastMPAvailabilityCheckMinutes",
+                            "dimensions": [
+                                {
+                                    "name": "Computer",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                },
+                                {
+                                    "name": "LastMPAvailabilityCheckTime",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                }
+                            ],
+                            "resourceIdColumn": "_ResourceId",
+                            "operator": "GreaterThan",
+                            "threshold": 10,
+                            "failingPeriods": {
+                                "numberOfEvaluationPeriods": 1,
+                                "minFailingPeriodsToAlert": 1
+                            }
+                        }
+                    ]
+                },
+                "autoMitigate": true
+            }
+        },
+        {
+            "type": "microsoft.insights/scheduledqueryrules",
+            "apiVersion": "2023-03-15-preview",
+            "name": "ConfigMgr - Management Point - No Successful User Service Availability Check",
+            "location": "[parameters('Location')]",
+            "properties": {
+                "displayName": "ConfigMgr - Management Point - No Successful User Service Availability Check",
+                "description": "The last successful User Service Availability check was over 10 minutes ago (mpcontrol.log).",
+                "severity": 1,
+                "enabled": true,
+                "evaluationFrequency": "PT5M",
+                "scopes": [
+                    "[parameters('LogAnalyticsWorkspace')]"
+                ],
+                "targetResourceTypes": [
+                    "Microsoft.OperationalInsights/workspaces"
+                ],
+                "windowSize": "P1D",
+                "criteria": {
+                    "allOf": [
+                        {
+                            "query": "//Management Point Health Checks Health\n//List of Management Points\nConfigMgr_Logs_CL\n| extend Computer=tostring(split(_ResourceId, \"/\")[8])\n| extend FileName=tostring(split(FilePath, \"\\\\\")[-1])\n| where FileName == \"mpcontrol.log\"\n| summarize by Computer\n| join kind=leftouter(\n    //MP Availability Check\n    ConfigMgr_Logs_CL\n    | extend Computer=tostring(split(_ResourceId, \"/\")[8])\n    | extend FileName=tostring(split(FilePath, \"\\\\\")[-1])\n    | where FileName == \"mpcontrol.log\"\n    | where RawData contains \"Successfully performed Management Point availability check against local computer\"\n    | summarize LastMPAvailabilityCheckTime = max(TimeGenerated) by Computer\n    | extend LastMPAvailabilityCheckMinutes = datetime_diff('minute', now(), LastMPAvailabilityCheckTime)\n    )\n    on Computer\n| join kind=leftouter(\n    //User Service Availability Check\n    ConfigMgr_Logs_CL\n    | extend Computer=tostring(split(_ResourceId, \"/\")[8])\n    | extend FileName=tostring(split(FilePath, \"\\\\\")[-1])\n    | where FileName == \"mpcontrol.log\"\n    | where RawData contains \"Successfully performed User Service availability check against local computer\"\n    | summarize LastUserServiceAvailabilityCheckTime = max(TimeGenerated) by Computer\n    | extend LastUserServiceAvailabilityCheckMinutes = datetime_diff('minute', now(), LastUserServiceAvailabilityCheckTime)\n    )\n    on Computer\n| join kind=leftouter(\n    //HTTP Send Request Sync\n    ConfigMgr_Logs_CL\n    | extend Computer=tostring(split(_ResourceId, \"/\")[8])\n    | extend FileName=tostring(split(FilePath, \"\\\\\")[-1])\n    | where FileName == \"mpcontrol.log\"\n    | where RawData contains \"Call to HttpSendRequestSync succeeded\"\n    | summarize LastHTTPSendRequestSyncTime = max(TimeGenerated) by Computer\n    | extend LastHTTPSendRequestSyncMinutes = datetime_diff('minute', now(), LastHTTPSendRequestSyncTime)\n    )\n    on Computer\n| join kind=leftouter(\n    //HTTP Test Request\n    ConfigMgr_Logs_CL\n    | extend Computer=tostring(split(_ResourceId, \"/\")[8])\n    | extend FileName=tostring(split(FilePath, \"\\\\\")[-1])\n    | where FileName == \"mpcontrol.log\"\n    | where RawData contains \"Http test request succeeded\"\n    | summarize LastHTTPTestRequestTime = max(TimeGenerated) by Computer\n    | extend LastHTTPTestRequestMinutes = datetime_diff('minute', now(), LastHTTPTestRequestTime)\n    )\n    on Computer\n| join kind=leftouter(\n    //Certificate Validation\n    ConfigMgr_Logs_CL\n    | extend Computer=tostring(split(_ResourceId, \"/\")[8])\n    | extend FileName=tostring(split(FilePath, \"\\\\\")[-1])\n    | where FileName == \"mpcontrol.log\"\n    | where RawData contains \"Completed validation of Certificate\"\n    | summarize LastCertValidationTime = max(TimeGenerated) by Computer\n    | extend LastCertValidationMinutes = datetime_diff('minute', now(), LastCertValidationTime)\n    )\n    on Computer\n| extend LastMPAvailabilityCheckMinutes = iif(isnull(LastMPAvailabilityCheckTime), -111, LastMPAvailabilityCheckMinutes)\n| extend LastUserServiceAvailabilityCheckMinutes = iif(isnull(LastUserServiceAvailabilityCheckTime), -111, LastUserServiceAvailabilityCheckMinutes)\n| extend LastHTTPSendRequestSyncMinutes = iif(isnull(LastHTTPSendRequestSyncTime), -111, LastHTTPSendRequestSyncMinutes)\n| extend LastHTTPTestRequestMinutes = iif(isnull(LastHTTPTestRequestTime), -111, LastHTTPTestRequestMinutes)\n| extend LastCertValidationMinutes = iif(isnull(LastCertValidationTime), -111, LastCertValidationMinutes)\n//| project Computer,LastMPAvailabilityCheckMinutes,LastUserServiceAvailabilityCheckMinutes,LastHTTPSendRequestSyncMinutes,LastHTTPTestRequestMinutes,LastCertValidationMinutes\n| extend Health = iff(LastMPAvailabilityCheckMinutes > 10 or LastUserServiceAvailabilityCheckMinutes > 10 or LastHTTPSendRequestSyncMinutes > 10 or LastHTTPTestRequestMinutes > 10 or LastCertValidationMinutes > 45, 1, 0)\n| join kind=leftouter \n    (\n    Heartbeat\n    | distinct _ResourceId, Computer\n    | extend Computer=tostring(split(_ResourceId, \"/\")[8])\n    | extend Computer = tolower(Computer)\n    | project Computer, _ResourceId\n    )\n    on Computer\n| project\n    Computer,\n    tostring(LastMPAvailabilityCheckTime),\n    LastMPAvailabilityCheckMinutes,\n    tostring(LastUserServiceAvailabilityCheckTime),\n    LastUserServiceAvailabilityCheckMinutes,\n    tostring(LastHTTPSendRequestSyncTime),\n    LastHTTPSendRequestSyncMinutes,\n    tostring(LastHTTPTestRequestTime),\n    LastHTTPTestRequestMinutes,\n    tostring(LastCertValidationTime),\n    LastCertValidationMinutes,\n    _ResourceId\n//| where LastUserServiceAvailabilityCheckMinutes > 10\n\n",
+                            "timeAggregation": "Total",
+                            "metricMeasureColumn": "LastUserServiceAvailabilityCheckMinutes",
+                            "dimensions": [
+                                {
+                                    "name": "Computer",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                },
+                                {
+                                    "name": "LastUserServiceAvailabilityCheckTime",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                }
+                            ],
+                            "resourceIdColumn": "_ResourceId",
+                            "operator": "GreaterThan",
+                            "threshold": 10,
+                            "failingPeriods": {
+                                "numberOfEvaluationPeriods": 1,
+                                "minFailingPeriodsToAlert": 1
+                            }
+                        }
+                    ]
+                },
+                "autoMitigate": true
+            }
+        },
+        {
+            "type": "microsoft.insights/scheduledqueryrules",
+            "apiVersion": "2023-03-15-preview",
+            "name": "ConfigMgr - VM - Essential Service Not Running",
+            "location": "[parameters('Location')]",
+            "properties": {
+                "displayName": "ConfigMgr - VM - Essential Service Not Running",
+                "description": "One or more essential services on a ConfigMgr server is not running.",
+                "severity": 1,
+                "enabled": true,
+                "evaluationFrequency": "PT5M",
+                "scopes": [
+                    "[parameters('LogAnalyticsWorkspace')]"
+                ],
+                "targetResourceTypes": [
+                    "Microsoft.OperationalInsights/workspaces"
+                ],
+                "windowSize": "P1D",
+                "criteria": {
+                    "allOf": [
+                        {
+                            "query": "[concat('let ConfigMgr_ResourceGroup = \"',parameters('ConfigMgrResourceGroupName'),'\";\nlet CMG_ResourceGroup = \"',parameters('CMGResourceGroupName'),'\";\nConfigurationData\n| where _ResourceId contains ConfigMgr_ResourceGroup or _ResourceId contains CMG_ResourceGroup\n| where Computer !contains \"test\"\n| where ConfigDataType == \"WindowsServices\"\n| where SvcDisplayName in\n    (\n    //MECM Services\n    \"SMS Agent Host\",\n    \"SMS_EXECUTIVE\",\n    \"SMS_SITE_COMPONENT_MANAGER\",\n    \"SMS_SITE_VSS_WRITER\",\n    \"SQL Server VSS Writer\",\n    \"Windows Management Instrumentation\",\n    \"World Wide Web Publishing Service\",\n    \"WSUS Service\"\n    ) or SvcDisplayName contains \"SMS_SITE_SQL_BACKUP\"\n| summarize arg_max(TimeGenerated, *) by Computer, _ResourceId, SvcDisplayName\n| extend Computer = tolower(Computer)\n| project\n    TimeGenerated,\n    Computer,\n    SvcDisplayName,\n    SvcName,\n    SvcAccount,\n    SvcStartupType,\n    SvcState,\n    _ResourceId\n| extend LastStatusTimeMinutes = datetime_diff(\"minute\", now(), TimeGenerated)\n| extend LastStatusTimeUTC = tostring(TimeGenerated)\n| project\n    Computer,\n    SvcDisplayName,\n    SvcState,\n    LastStatusTimeMinutes,\n    LastStatusTimeUTC,\n    _ResourceId\n| order by SvcDisplayName asc, Computer asc\n| extend Health = iff(SvcState != \"Running\" or LastStatusTimeMinutes > 1440, 1, 0)\n| where SvcState != \"Running\"\n| summarize NotRunning = make_set(SvcDisplayName) by Computer, _ResourceId\n| extend Services_Not_Running=strcat_array(NotRunning, \"\\n \")\n| project Computer, Services_Not_Running, _ResourceId\n\n')]",
+                            "timeAggregation": "Count",
+                            "dimensions": [
+                                {
+                                    "name": "Computer",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                },
+                                {
+                                    "name": "Services_Not_Running",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                }
+                            ],
+                            "resourceIdColumn": "_ResourceId",
+                            "operator": "GreaterThan",
+                            "threshold": 0,
+                            "failingPeriods": {
+                                "numberOfEvaluationPeriods": 1,
+                                "minFailingPeriodsToAlert": 1
+                            }
+                        }
+                    ]
+                },
+                "autoMitigate": true
+            }
+        },
+        {
+            "type": "microsoft.insights/scheduledqueryrules",
+            "apiVersion": "2023-03-15-preview",
+            "name": "ConfigMgr - VM - High CPU",
+            "location": "[parameters('Location')]",
+            "properties": {
+                "displayName": "ConfigMgr - VM - High CPU",
+                "description": "A VM's CPU usage is over 95%",
+                "severity": 2,
+                "enabled": true,
+                "evaluationFrequency": "PT5M",
+                "scopes": [
+                    "[parameters('LogAnalyticsWorkspace')]"
+                ],
+                "targetResourceTypes": [
+                    "Microsoft.OperationalInsights/workspaces"
+                ],
+                "windowSize": "P1D",
+                "criteria": {
+                    "allOf": [
+                        {
+                            "query": "[concat('let ConfigMgr_ResourceGroup = \"',parameters('ConfigMgrResourceGroupName'),'\";\nlet CMG_ResourceGroup = \"',parameters('CMGResourceGroupName'),'\";\nInsightsMetrics\n| where _ResourceId contains ConfigMgr_ResourceGroup or _ResourceId contains CMG_ResourceGroup\n| where Computer !contains \"test\"\n| where Namespace == \"Processor\" and Name == \"UtilizationPercentage\"\n| extend _ResourceId = tolower(_ResourceId)\n| summarize AvgCPU = round(avg(Val), 0) by bin(TimeGenerated, 15m), Computer, _ResourceId\n| summarize arg_max(TimeGenerated, *) by Computer, _ResourceId\n//| where AvgCPU > 95\n\n')]",
+                            "timeAggregation": "Average",
+                            "metricMeasureColumn": "AvgCPU",
+                            "dimensions": [
+                                {
+                                    "name": "Computer",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                }
+                            ],
+                            "resourceIdColumn": "_ResourceId",
+                            "operator": "GreaterThan",
+                            "threshold": 95,
+                            "failingPeriods": {
+                                "numberOfEvaluationPeriods": 1,
+                                "minFailingPeriodsToAlert": 1
+                            }
+                        }
+                    ]
+                },
+                "autoMitigate": true
+            }
+        },
+        {
+            "type": "microsoft.insights/scheduledqueryrules",
+            "apiVersion": "2023-03-15-preview",
+            "name": "ConfigMgr - VM - Low Disk Space",
+            "location": "[parameters('Location')]",
+            "properties": {
+                "displayName": "ConfigMgr - VM - Low Disk Space",
+                "description": "A VM has less that 1gb free space on a disk.",
+                "severity": 2,
+                "enabled": true,
+                "evaluationFrequency": "PT5M",
+                "scopes": [
+                    "[parameters('LogAnalyticsWorkspace')]"
+                ],
+                "targetResourceTypes": [
+                    "Microsoft.OperationalInsights/workspaces"
+                ],
+                "windowSize": "P1D",
+                "criteria": {
+                    "allOf": [
+                        {
+                            "query": "[concat('let ConfigMgr_ResourceGroup = \"',parameters('ConfigMgrResourceGroupName'),'\";\nlet CMG_ResourceGroup = \"',parameters('CMGResourceGroupName'),'\";\nInsightsMetrics\n| where _ResourceId contains ConfigMgr_ResourceGroup or _ResourceId contains CMG_ResourceGroup\n| where Computer !contains \"test\"\n| where Origin == \"vm.azm.ms\"\n| where Namespace == \"LogicalDisk\" and Name == \"FreeSpaceMB\"\n| extend Disk=tostring(todynamic(Tags)[\"vm.azm.ms/mountId\"])\n| summarize AvgFreeSpace = avg(Val) by bin(TimeGenerated, 15m), Computer, _ResourceId, Disk\n| summarize arg_max(TimeGenerated, *) by Computer, Disk, _ResourceId\n//| where AvgFreeSpace < 1000\n\n')]",
+                            "timeAggregation": "Average",
+                            "metricMeasureColumn": "AvgFreeSpace",
+                            "dimensions": [
+                                {
+                                    "name": "Computer",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                },
+                                {
+                                    "name": "Disk",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                }
+                            ],
+                            "resourceIdColumn": "_ResourceId",
+                            "operator": "LessThan",
+                            "threshold": 1000,
+                            "failingPeriods": {
+                                "numberOfEvaluationPeriods": 1,
+                                "minFailingPeriodsToAlert": 1
+                            }
+                        }
+                    ]
+                },
+                "autoMitigate": true
+            }
+        },
+        {
+            "type": "microsoft.insights/scheduledqueryrules",
+            "apiVersion": "2023-03-15-preview",
+            "name": "ConfigMgr - VM - Low Memory",
+            "location": "[parameters('Location')]",
+            "properties": {
+                "displayName": "ConfigMgr - VM - Low Memory",
+                "description": "A VM's memory usage is over 95%",
+                "severity": 2,
+                "enabled": true,
+                "evaluationFrequency": "PT5M",
+                "scopes": [
+                    "[parameters('LogAnalyticsWorkspace')]"
+                ],
+                "targetResourceTypes": [
+                    "Microsoft.OperationalInsights/workspaces"
+                ],
+                "windowSize": "P1D",
+                "criteria": {
+                    "allOf": [
+                        {
+                            "query": "[concat('let ConfigMgr_ResourceGroup = \"',parameters('ConfigMgrResourceGroupName'),'\";\nlet CMG_ResourceGroup = \"',parameters('CMGResourceGroupName'),'\";\nInsightsMetrics\n| where _ResourceId contains ConfigMgr_ResourceGroup or _ResourceId contains CMG_ResourceGroup\n| where Computer !contains \"test\"\n| where Namespace == \"Memory\" and Name == \"AvailableMB\"\n| extend _ResourceId = tolower(_ResourceId)\n| extend AvailableMemory=toreal(Val)\n| extend TotalMemory = toreal(todynamic(Tags)[\"vm.azm.ms/memorySizeMB\"])\n| extend AvailableMemoryPercentage = (AvailableMemory / TotalMemory) * 100.0\n| extend UsedMemory = (TotalMemory - AvailableMemory)\n| extend UsedMemoryPercentage = toint((UsedMemory / TotalMemory) * 100)\n| summarize UsedMemoryPercentage=avg(UsedMemoryPercentage) by bin(TimeGenerated, 15m), Computer, _ResourceId\n| extend UsedMemoryPercentage = round(UsedMemoryPercentage, 0)\n| summarize arg_max(TimeGenerated, *) by Computer, _ResourceId\n//| where UsedMemoryPercentage > 95\n\n')]",
+                            "timeAggregation": "Total",
+                            "metricMeasureColumn": "UsedMemoryPercentage",
+                            "dimensions": [
+                                {
+                                    "name": "Computer",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                }
+                            ],
+                            "resourceIdColumn": "_ResourceId",
+                            "operator": "GreaterThan",
+                            "threshold": 95,
+                            "failingPeriods": {
+                                "numberOfEvaluationPeriods": 1,
+                                "minFailingPeriodsToAlert": 1
+                            }
+                        }
+                    ]
+                },
+                "autoMitigate": true
+            }
+        },
+        {
+            "type": "microsoft.insights/scheduledqueryrules",
+            "apiVersion": "2023-03-15-preview",
+            "name": "ConfigMgr - VM - Monitoring Offline",
+            "location": "[parameters('Location')]",
+            "properties": {
+                "displayName": "ConfigMgr - VM - Monitoring Offline",
+                "description": "VM is not connecting to Azure Log Analytics",
+                "severity": 1,
+                "enabled": true,
+                "evaluationFrequency": "PT5M",
+                "scopes": [
+                    "[parameters('LogAnalyticsWorkspace')]"
+                ],
+                "targetResourceTypes": [
+                    "Microsoft.OperationalInsights/workspaces"
+                ],
+                "windowSize": "P2D",
+                "criteria": {
+                    "allOf": [
+                        {
+                            "query": "[concat('let ConfigMgr_ResourceGroup = \"',parameters('ConfigMgrResourceGroupName'),'\";\nlet CMG_ResourceGroup = \"',parameters('CMGResourceGroupName'),'\";\nHeartbeat\n| where Category == \"Azure Monitor Agent\"\n| where Computer contains \"\"\n| where _ResourceId contains ConfigMgr_ResourceGroup or _ResourceId contains CMG_ResourceGroup\n| where _ResourceId !contains \"test\"\n| summarize TimeGenerated=max(TimeGenerated) by Computer, _ResourceId\n| extend Duration = datetime_diff(\"minute\", now(), TimeGenerated)\n| summarize LastHeartbeatMinutes = min(Duration) by Computer, bin(TimeGenerated, 5m), _ResourceId\n| extend LastHeartbeatTime = tostring(TimeGenerated)\n| where LastHeartbeatMinutes > 5\n')]",
+                            "timeAggregation": "Count",
+                            "dimensions": [
+                                {
+                                    "name": "Computer",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                },
+                                {
+                                    "name": "LastHeartbeatTime",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                }
+                            ],
+                            "operator": "GreaterThan",
+                            "threshold": 5,
+                            "failingPeriods": {
+                                "numberOfEvaluationPeriods": 1,
+                                "minFailingPeriodsToAlert": 1
+                            }
+                        }
+                    ]
+                },
+                "autoMitigate": true
+            }
+        },
+        {
+            "type": "microsoft.insights/scheduledqueryrules",
+            "apiVersion": "2023-03-15-preview",
+            "name": "ConfigMgr - VM - No Service Status",
+            "location": "[parameters('Location')]",
+            "properties": {
+                "displayName": "ConfigMgr - VM - No Service Status",
+                "description": "The VM has not reported ConfigMgr Service Status in over 24 hours. Check to verify that Change Tracking is configured and working on the VM, and that ConfigMgr services are installed.",
+                "severity": 1,
+                "enabled": true,
+                "evaluationFrequency": "PT5M",
+                "scopes": [
+                    "[parameters('LogAnalyticsWorkspace')]"
+                ],
+                "targetResourceTypes": [
+                    "Microsoft.OperationalInsights/workspaces"
+                ],
+                "windowSize": "P2D",
+                "criteria": {
+                    "allOf": [
+                        {
+                            "query": "[concat('let ConfigMgr_ResourceGroup = \"',parameters('ConfigMgrResourceGroupName'),'\";\nlet CMG_ResourceGroup = \"',parameters('CMGResourceGroupName'),'\";\nConfigurationData\n| where _ResourceId contains ConfigMgr_ResourceGroup or _ResourceId contains CMG_ResourceGroup\n| where Computer !contains \"test\"\n| where ConfigDataType == \"WindowsServices\"\n| where SvcDisplayName in\n    (\n    //MECM Services\n    \"SMS Agent Host\",\n    \"SMS_EXECUTIVE\",\n    \"SMS_SITE_COMPONENT_MANAGER\",\n    \"SMS_SITE_VSS_WRITER\",\n    \"SQL Server VSS Writer\",\n    \"Windows Management Instrumentation\",\n    \"World Wide Web Publishing Service\",\n    \"WSUS Service\"\n    ) or SvcDisplayName contains \"SMS_SITE_SQL_BACKUP\"\n| summarize arg_max(TimeGenerated, *) by Computer, _ResourceId//,SvcDisplayName\n| extend LastStatusTimeMinutes = datetime_diff(\"minute\", now(), TimeGenerated)\n| extend LastStatusTimeUTC = tostring(TimeGenerated)\n| project Computer, LastStatusTimeUTC, LastStatusTimeMinutes, _ResourceId\n//| where LastStatusTimeMinutes > 1440\n\n')]",
+                            "timeAggregation": "Total",
+                            "metricMeasureColumn": "LastStatusTimeMinutes",
+                            "dimensions": [
+                                {
+                                    "name": "Computer",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                },
+                                {
+                                    "name": "LastStatusTimeUTC",
+                                    "operator": "Include",
+                                    "values": [
+                                        "*"
+                                    ]
+                                }
+                            ],
+                            "resourceIdColumn": "_ResourceId",
+                            "operator": "GreaterThan",
+                            "threshold": 1440,
+                            "failingPeriods": {
+                                "numberOfEvaluationPeriods": 1,
+                                "minFailingPeriodsToAlert": 1
+                            }
+                        }
+                    ]
+                },
+                "autoMitigate": true
+            }
+        }
+    ]
+}
